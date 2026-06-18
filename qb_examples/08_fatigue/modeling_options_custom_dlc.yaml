@@ -39,7 +39,23 @@ RAFT:
 
     
 QBlade:                         # Options for WEIS fidelity, nonlinear time domain with QBlade
-    flag: True
+    flag: true
+    from_qblade: false
+    tower_fatigue:
+        flag: true
+        n_theta: 36
+        lifetime_years: 25.0
+        fatigue_design_factor: 1.0
+        sn_model: single_slope
+        sn_slope: 4.0
+        sn_intercept: 1.459e12
+        stress_unit: MPa
+        apply_thickness_correction: true
+        t_ref: 0.025
+        k_thickness: 0.20
+        rainflow_bins: 128
+        normalize_probabilities: false
+        check_probability_sum: false
     simulation:
         Simulate: True
         DLCGenerator: True
@@ -162,15 +178,7 @@ QBlade:                         # Options for WEIS fidelity, nonlinear time doma
         SUB_HYDROSTIFFNESS4: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         SUB_HYDROSTIFFNESS5: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         SUB_HYDROSTIFFNESS6: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    QTurbSim:                               # TurbSim settings 
-        TimeStep: 0.05
-        AnalysisTime: 100
-        HubHt: 150
-        RefHt: 150
-        GridHeight: 290
-        GridWidth: 290
-        URef: [6,10,14]
-        RandSeed1: [10, 10, 10]
+
 ROSCO:
     flag: True
     # SD_Mode: 0
@@ -206,7 +214,7 @@ DLC_driver:
         #   transient_time: 10.0  # 0.
         #   analysis_time: 60.0  # 10.
         - DLC: "Custom"
-          n_seeds: 1
+          n_seeds: 2
           transient_time: 5.0 
           analysis_time: 5.0
   
@@ -214,6 +222,6 @@ DLC_driver:
           wave_height:   [1.1,  1.8,  1.4]
           wave_period:   [6.8,  8.2,  7.1]
           wave_heading:  [0.0, 30.0,  0.0]
-          probabilities: [0.18, 0.07, 0.24]
+          probabilities: [0.38, 0.23, 0.39]
     
 

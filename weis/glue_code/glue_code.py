@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import openmdao.api as om
+import copy
 from wisdem.glue_code.glue_code import WindPark as wisdemPark
 #from wisdem.glue_code.gc_WT_DataStruc import WindTurbineOntologyOpenMDAO
 #from wisdem.ccblade.ccblade_component import CCBladeTwist
@@ -27,6 +28,8 @@ from wisdem.inputs import load_yaml
 from wisdem.commonse.cylinder_member import get_nfull
 
 from weis.aeroelasticse.openmdao_qblade import QBLADELoadCases
+from weis.aeroelasticse.tower_fatigue_post import CylinderFatiguePostFrame
+from weis.dlc_driver.dlc_generator import DLCGenerator
 try:
     from weis.gebt.sonata_wrapper import SONATA_WEIS
 except ImportError:
@@ -35,6 +38,94 @@ except ImportError:
 
 
 weis_dir = os.path.realpath(os.path.join(os.path.dirname(__file__),'../../'))
+
+
+def qblade_tower_fatigue_enabled(modeling_options):
+    qbmgmt = modeling_options['General']['qblade_configuration']
+    fatigue_options = modeling_options['QBlade'].get('tower_fatigue', {})
+    return fatigue_options.get('flag', qbmgmt.get('tower_fatigue_post', False))
+
+
+def qblade_tower_fatigue_component_options(modeling_options):
+    fatigue_options = modeling_options['QBlade'].get('tower_fatigue', {})
+    return {
+        'n_theta': fatigue_options.get('n_theta', 36),
+        'lifetime_years': fatigue_options.get('lifetime_years', 25.0),
+        'fatigue_design_factor': fatigue_options.get('fatigue_design_factor', 1.0),
+        'sn_slope': fatigue_options.get('sn_slope', 3.0),
+        'sn_intercept': fatigue_options.get('sn_intercept', 10.0**12.164),
+        'stress_unit': fatigue_options.get('stress_unit', 'MPa'),
+        'apply_thickness_correction': fatigue_options.get('apply_thickness_correction', True),
+        't_ref': fatigue_options.get('t_ref', 0.025),
+        'k_thickness': fatigue_options.get('k_thickness', 0.20),
+        'rainflow_bins': fatigue_options.get('rainflow_bins', 128),
+        'normalize_probabilities': fatigue_options.get('normalize_probabilities', False),
+        'check_probability_sum': fatigue_options.get('check_probability_sum', True),
+    }
+
+
+def qblade_tower_fatigue_dimensions(modeling_options):
+    qbmgmt = modeling_options['General']['qblade_configuration']
+    qbopt = modeling_options['QBlade']['simulation']
+    dt = qbopt['TIMESTEP']
+    max_cases = int(qbmgmt.get('tower_fatigue_max_cases', 0))
+
+    if qbopt['DLCGenerator']:
+        if max_cases <= 0:
+            dlc_generator = DLCGenerator(
+                ws_cut_in=4.0,
+                ws_cut_out=25.0,
+                ws_rated=10.0,
+                wind_speed_class='I',
+                wind_turbulence_class='A',
+                fix_wind_seeds=modeling_options['DLC_driver']['fix_wind_seeds'],
+                fix_wave_seeds=modeling_options['DLC_driver']['fix_wave_seeds'],
+                metocean=modeling_options['DLC_driver']['metocean_conditions'],
+                dlc_driver_options=modeling_options['DLC_driver'],
+                initial_condition_table={},
+            )
+            for dlc_opt in modeling_options['DLC_driver']['DLCs']:
+                dlc_generator.generate(dlc_opt['DLC'], copy.deepcopy(dlc_opt))
+            max_cases = max(1, dlc_generator.n_cases)
+
+        max_analysis_time = 0.0
+        for dlc_opt in modeling_options['DLC_driver']['DLCs']:
+            analysis_time = dlc_opt['analysis_time'] if dlc_opt['analysis_time'] > 0 else 600.0
+            max_analysis_time = max(max_analysis_time, analysis_time)
+        duration = max_analysis_time
+    else:
+        if qbopt['WNDTYPE'] == 1 and 'QTurbSim' in modeling_options['QBlade'] and len(modeling_options['QBlade']['QTurbSim'].get('URef', [])) > 0:
+            inferred_cases = len(modeling_options['QBlade']['QTurbSim']['URef'])
+        else:
+            meaninf = qbopt['MEANINF']
+            inferred_cases = len(meaninf) if isinstance(meaninf, (list, tuple, np.ndarray)) else 1
+        max_cases = max_cases if max_cases > 0 else max(1, inferred_cases)
+
+        if qbopt['TMax'] > 0:
+            duration = max(qbopt['TMax'] - qbopt['STOREFROM'], dt)
+        else:
+            duration = max(qbopt['NUMTIMESTEPS'] * dt - qbopt['STOREFROM'], dt)
+
+    n_time = int(np.ceil(duration / dt)) + 2
+    return max_cases, n_time
+
+
+class NodalToSectionalDiameter(om.ExplicitComponent):
+    """Convert nodal cylinder diameters to section-center diameters."""
+
+    def initialize(self):
+        self.options.declare("n_full", types=int)
+
+    def setup(self):
+        n_full = self.options["n_full"]
+        self.add_input("outer_diameter_full", val=np.ones(n_full), units="m")
+        self.add_output("section_D", val=np.ones(n_full - 1), units="m")
+        self.declare_partials("*", "*", method="fd")
+
+    def compute(self, inputs, outputs):
+        diameter = inputs["outer_diameter_full"]
+        outputs["section_D"] = 0.5 * (diameter[:-1] + diameter[1:])
+
 
 class WindPark(om.Group):
     # Openmdao group to run the analysis of the wind turbine
@@ -392,7 +483,7 @@ class WindPark(om.Group):
                 n_refine = modeling_options['WISDEM']['TowerSE']["n_refine"]
                 n_full = get_nfull(n_height, nref=n_refine)
                 self.add_subsystem('towerse_post',   CylinderPostFrame(modeling_options=modeling_options["WISDEM"]["TowerSE"], n_dlc=1, n_full = n_full))
-                
+            
             if modeling_options["flags"]["monopile"]:
                 n_height = modeling_options['WISDEM']['FixedBottomSE']["n_height"]
                 n_refine = modeling_options['WISDEM']['FixedBottomSE']["n_refine"]
@@ -987,6 +1078,19 @@ class WindPark(om.Group):
                 n_refine = modeling_options['WISDEM']['TowerSE']["n_refine"]
                 n_full = get_nfull(n_height, nref=n_refine)
                 self.add_subsystem('towerse_post',   CylinderPostFrame(modeling_options=modeling_options["WISDEM"]["TowerSE"], n_dlc=1, n_full = n_full))
+                if qblade_tower_fatigue_enabled(modeling_options) and not modeling_options['QBlade']['from_qblade']:
+                    n_ts_fatigue, n_time_fatigue = qblade_tower_fatigue_dimensions(modeling_options)
+                    tower_fatigue_options = qblade_tower_fatigue_component_options(modeling_options)
+                    self.add_subsystem('tower_fatigue_diameters', NodalToSectionalDiameter(n_full=n_full))
+                    self.add_subsystem(
+                        'tower_fatigue_post',
+                        CylinderFatiguePostFrame(
+                            n_ts=n_ts_fatigue,
+                            n_sec=n_full - 1,
+                            n_time=n_time_fatigue,
+                            **tower_fatigue_options,
+                        ),
+                    )
             
             if modeling_options["flags"]["monopile"]:
                 n_height = modeling_options['WISDEM']['FixedBottomSE']["n_height"]
@@ -1255,6 +1359,21 @@ class WindPark(om.Group):
                     self.connect("aeroelastic_qblade.tower_maxMy_Mx", "towerse_post.cylinder_Mxx")
                     self.connect("aeroelastic_qblade.tower_maxMy_My", "towerse_post.cylinder_Myy")
                     self.connect("aeroelastic_qblade.tower_maxMy_Mz", "towerse_post.cylinder_Mzz")
+
+                    if qblade_tower_fatigue_enabled(modeling_options) and not modeling_options['QBlade']['from_qblade']:
+                        self.connect('towerse.outer_diameter_full', 'tower_fatigue_diameters.outer_diameter_full')
+                        self.connect('tower_fatigue_diameters.section_D', 'tower_fatigue_post.section_D')
+                        self.connect('towerse.t_full', 'tower_fatigue_post.section_t')
+
+                        self.connect('aeroelastic_qblade.tower_Fx_ts', 'tower_fatigue_post.tower_Fx_ts')
+                        self.connect('aeroelastic_qblade.tower_Fy_ts', 'tower_fatigue_post.tower_Fy_ts')
+                        self.connect('aeroelastic_qblade.tower_Fz_ts', 'tower_fatigue_post.tower_Fz_ts')
+                        self.connect('aeroelastic_qblade.tower_Mx_ts', 'tower_fatigue_post.tower_Mx_ts')
+                        self.connect('aeroelastic_qblade.tower_My_ts', 'tower_fatigue_post.tower_My_ts')
+                        self.connect('aeroelastic_qblade.tower_Mz_ts', 'tower_fatigue_post.tower_Mz_ts')
+                        self.connect('aeroelastic_qblade.case_probability', 'tower_fatigue_post.case_probability')
+                        self.connect('aeroelastic_qblade.case_duration', 'tower_fatigue_post.case_duration')
+                        self.connect('aeroelastic_qblade.case_n_samples', 'tower_fatigue_post.case_n_samples')
 
                 if modeling_options["flags"]["monopile"]:
                     # mono_params = ["z_full","d_full","t_full",

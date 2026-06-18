@@ -110,7 +110,7 @@ properties:
                         description: Flag to only generate a QBlade model and stop
                     path2qb_dll:
                         type: string
-                        default: /home/papi/software/QBladeCE_2.0.9/libQBladeCE_2.0.9.so.1.0.0
+                        default: C:\Users\irene\NREL_tools\QBladeCE_2.0.9.5\QBladeCE_2.0.9.5.dll
                         description: Path to QBlade shared library (e.g. /home/user/QBlade/libqblade.so)
                     cl_devices:
                         type: array
@@ -128,6 +128,15 @@ properties:
                         type: boolean
                         default: True
                         description: Keep timeseries in openmdao_qblade for post-processing
+                    tower_fatigue_post:
+                        type: boolean
+                        default: False
+                        description: Expose padded QBlade tower sectional load time histories as OpenMDAO outputs for downstream tower fatigue post-processing.
+                    tower_fatigue_max_cases:
+                        type: integer
+                        default: 0
+                        minimum: 0
+                        description: Optional upper bound for the number of QBlade cases stored in tower fatigue time-history outputs. If zero, WEIS attempts to infer the case count during setup.
                     store_turbines:
                         type: boolean
                         default: False
@@ -259,6 +268,75 @@ properties:
         type: object
         default: {}
         description: Options for running QBlade.  No further options are included in this file.  They are populated using the qblade schema.
+        properties:
+            tower_fatigue:
+                type: object
+                default: {}
+                description: Options for distributed tower fatigue post-processing from QBlade sectional load time histories.
+                properties:
+                    flag:
+                        type: boolean
+                        default: False
+                        description: Enable QBlade tower sectional fatigue post-processing.
+                    n_theta:
+                        type: integer
+                        default: 36
+                        minimum: 1
+                        description: Number of circumferential points where tower shell stress is evaluated.
+                    lifetime_years:
+                        type: number
+                        default: 25.0
+                        minimum: 0.0
+                        unit: yr
+                        description: Design lifetime used to scale fatigue damage.
+                    fatigue_design_factor:
+                        type: number
+                        default: 1.0
+                        minimum: 0.0
+                        description: Multiplier applied to fatigue damage for the utilization constraint.
+                    sn_slope:
+                        type: number
+                        default: 3.0
+                        minimum: 0.0
+                        description: S-N curve slope.
+                    sn_intercept:
+                        type: number
+                        default: 1.459e+12
+                        minimum: 0.0
+                        description: S-N curve intercept in N = A / S**m form, using the selected stress_unit.
+                    stress_unit:
+                        type: string
+                        default: MPa
+                        enum: [MPa, Pa]
+                        description: Stress unit expected by the S-N curve.
+                    apply_thickness_correction:
+                        type: boolean
+                        default: True
+                        description: Apply fatigue thickness correction to rainflow stress ranges.
+                    t_ref:
+                        type: number
+                        default: 0.025
+                        minimum: 0.0
+                        unit: m
+                        description: Reference thickness for the fatigue thickness correction.
+                    k_thickness:
+                        type: number
+                        default: 0.20
+                        minimum: 0.0
+                        description: Exponent for the fatigue thickness correction.
+                    rainflow_bins:
+                        type: integer
+                        default: 128
+                        minimum: 1
+                        description: Number of bins used by rainflow counting.
+                    normalize_probabilities:
+                        type: boolean
+                        default: False
+                        description: Normalize case probabilities inside the fatigue component.
+                    check_probability_sum:
+                        type: boolean
+                        default: True
+                        description: Require case probabilities to sum to one unless normalize_probabilities is enabled.
     OpenFAST: &of_modopt
         type: object
         default: {}
