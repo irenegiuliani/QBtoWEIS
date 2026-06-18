@@ -86,6 +86,14 @@ class QBLADELoadCases(ExplicitComponent):
     def setup(self):
         # iteration counter used as model name appendix
         self.qb_inumber = 0
+
+        # Fixed-load outer-loop support.
+        # When modeling_options['QBlade']['freeze_loads'] is True, these attributes
+        # are used by the outer loop script to freeze QBlade outputs between optimizer
+        # evaluations.  They are never set automatically — the outer loop script is
+        # responsible for toggling freeze_mode explicitly.
+        self.freeze_mode = False     # set to True by the outer loop after each QBlade run
+        self._frozen_outputs = {}    # populated at the end of the first successful QBlade run
         
         modopt = self.options['modeling_options']
         rotorse_options  = modopt['WISDEM']['RotorSE']
@@ -491,7 +499,18 @@ class QBLADELoadCases(ExplicitComponent):
         print("############################################################")
         print(f"The WEIS-QBlade component with version number: {__version__} is called")
         print("############################################################")
-        
+
+        modopt_top = self.options['modeling_options']
+        # Fixed-load freeze: return the previously computed outputs without running QBlade.
+        # Only active when modeling_options['QBlade']['freeze_loads'] is True AND the outer
+        # loop script has set self.freeze_mode = True after a successful QBlade evaluation.
+        # qb_inumber is intentionally NOT incremented so directory naming stays consistent.
+        if modopt_top['QBlade']['freeze_loads'] and self.freeze_mode and self._frozen_outputs:
+            print("[QBLADELoadCases] freeze_loads is active — returning frozen loads, skipping QBlade")
+            for name, val in self._frozen_outputs.items():
+                outputs[name] = val
+            return
+
         cache = self.options['cache']
 
         # This block is used to skip the QBlade run if the cache is enabled and the current iteration has been cached
@@ -2567,6 +2586,19 @@ class QBLADELoadCases(ExplicitComponent):
 
             if modopt['General']['qblade_configuration']['store_turbines']:
                 self.store_turbines()
+
+            # Fixed-load outer-loop: capture outputs so they can be returned frozen on
+            # subsequent optimizer evaluations.  This runs unconditionally when
+            # freeze_loads is True so that the snapshot is always current.
+            if modopt['QBlade']['freeze_loads']:
+                self._frozen_outputs = {name: np.copy(outputs[name]) for name in outputs}
+                freeze_save_dir = os.path.join(self.QBLADE_runDirectory,
+                                               'iteration_' + str(self.qb_inumber))
+                os.makedirs(freeze_save_dir, exist_ok=True)
+                frozen_loads_path = os.path.join(freeze_save_dir, 'frozen_loads.p')
+                with open(frozen_loads_path, 'wb') as _f:
+                    pickle.dump(self._frozen_outputs, _f)
+                print(f"[QBLADELoadCases] Frozen loads saved to {frozen_loads_path}")
         else:
             outputs = self.calculate_AEP(summary_stats, inputs, outputs, discrete_inputs)
 
@@ -2724,10 +2756,6 @@ class QBLADELoadCases(ExplicitComponent):
                 idx_pwrcrv = idx_pwrcrv[mask]
                 U = U[mask]
 
-                print("U:", U)
-                print("idx_pwrcrv:", idx_pwrcrv)
-                print("sum_stats.shape:", sum_stats.shape)
-
             stats_pwrcrv = sum_stats.iloc[idx_pwrcrv].copy()
         
         else:
@@ -2775,7 +2803,6 @@ class QBLADELoadCases(ExplicitComponent):
                         logger.warning(f'WARNING: Active Custom AEP probabilities sum to {active_prob_sum:.6f}. Only using the active probability mass for AEP calculation.')
                     #case_prob /= active_prob_sum
                     outputs['AEP'] = np.sum(case_power * case_prob) * 24.0 * 365.0
-
         else:
             # If DLC 1.1 was run
             if len(stats_pwrcrv['RtFldCp']['mean']) == 1: 

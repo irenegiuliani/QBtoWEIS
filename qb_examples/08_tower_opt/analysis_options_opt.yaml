@@ -1,0 +1,108 @@
+general:
+    folder_output: opt_output_driveopt
+    fname_output: IEA22MWD15_output_driveopt
+
+design_variables:
+
+    tower:
+        outer_diameter:
+            flag: True
+            lower_bound: 6.0
+            upper_bound: 10.0
+        layer_thickness:
+            flag: True
+            lower_bound: 0.005
+            upper_bound: 0.10
+            
+      
+merit_figure: tower_mass
+
+constraints:
+  tower:
+    stress:
+      flag: True
+    global_buckling:
+      flag: True
+    shell_buckling:
+      flag: True
+    d_to_t:
+      flag: True
+      lower_bound: 80.0
+      upper_bound: 300.0
+    taper:
+      flag: True
+      lower_bound: 0.5
+    slope:
+      flag: True
+    thickness_slope:
+      flag: True
+    frequency_1:
+      flag: True
+      lower_bound: 0.33744   #+20% su 3P
+      upper_bound: 0.600
+      
+
+driver:
+  optimization:
+    flag: True
+    tol: 1.e-3            # Optimality tolerance
+    max_iter: 20         # Maximum number of iterations (SLSQP)
+    solver: LN_COBYLA     # Optimization solver. Other options are 'SLSQP' - 'CONMIN'
+    
+recorder:
+    flag: True              # Flag to activate OpenMDAO recorder
+    file_name: 280-D15.sql  # Name of OpenMDAO recorder
+    includes: [
+      'floatingse.f1',
+      'floatingse.system_structural_mass',
+      'floatingse.platform_mass', 
+      'floatingse.pitch_period', 
+      'floatingse.heave_period', 
+      'floatingse.fixed_ballast_capacity', 
+      'floatingse.variable_ballast_capacity', 
+      'floatingse.freeboard_margin', 
+      'floatingse.draft_margin', 
+      'floatingse.platform_mass',
+      'towerse.tower_mass',
+      'towerse.tower_outer_diameter',
+      'towerse.tower_wall_thickness',
+      'towerse.constr_d_to_t',
+      'tower.layer_thickness',
+      'towerse.slope',
+      'towerse.thickness_slope',
+      'towerse.tower.turbine_M',
+      'towerse.tower.turbine_F',
+      'towerse.tower.f1',     
+      'towerse.tower.top_deflection',
+      'towerse.tower.structural_frequencies',
+      'towerse_post.constr_stress',
+      'towerse_post.constr_shell_buckling',
+      'towerse_post.constr_global_buckling',
+      'towerse.post.shear_stress',
+      'towerse.post.hoop_stress',
+      'towerse.post.constr_stress',
+      'towerse.post.constr_shell_buckling',
+      'towerse.post.constr_global_buckling',
+      'towerse.post.axial_stress',
+      'drivese.generator_mass',
+      'generator.generator_mass_user',
+      'aeroelastic_qblade.tower_maxMy_Fz',
+      'aeroelastic_qblade.tower_maxMy_Fx',
+      'aeroelastic_qblade.tower_maxMy_Fy',
+      'aeroelastic_qblade.tower_maxMy_Mx',
+      'aeroelastic_qblade.tower_maxMy_My',
+      'aeroelastic_qblade.tower_maxMy_Mz',
+      'towerse.post.cylinder_Fz',
+      'towerse.post.cylinder_Vx',
+      'towerse.post.cylinder_Vy',
+      'towerse.post.cylinder_Mxx',
+      'towerse.post.cylinder_Myy',
+      'towerse.post.cylinder_Mzz',
+      'towerse_post.cylinder_Fz',
+      'towerse_post.cylinder_Vx',
+      'towerse_post.cylinder_Vy',
+      'towerse_post.cylinder_Mxx',
+      'towerse_post.cylinder_Myy',
+      'towerse_post.cylinder_Mzz',                
+    ]
+

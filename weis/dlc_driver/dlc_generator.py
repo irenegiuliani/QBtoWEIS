@@ -16,9 +16,10 @@ def get_dlc_label_for_aep(dlc_labels):
     Return the preferred DLC label to use for AEP-style power curve estimation.
 
     Preference order is the dedicated AEP DLC first, then operating DLCs that can
-    still provide a usable wind-speed sweep when AEP is not available.
+    still provide a usable wind-speed sweep when AEP is not available. If none of
+    those are present, use Custom when available.
     """
-    for label in ['AEP', '1.1', '1.3', '1.6']:
+    for label in ['AEP', '1.1', '1.3', '1.6', 'Custom']:
         if label in dlc_labels:
             return label
     return None

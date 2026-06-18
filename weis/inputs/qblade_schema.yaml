@@ -1658,6 +1658,17 @@ properties:
                 type: boolean
                 default: False
                 description: Whether we derive QBlade model from an existing model and ignore WISDEM
+            freeze_loads:
+                type: boolean
+                default: False
+                description: >-
+                    Enable fixed-load outer-loop mode.  When True, QBLADELoadCases will
+                    expose freeze_mode and _frozen_outputs attributes so an outer-loop
+                    script can run QBlade once, freeze the resulting loads, and then let
+                    the optimizer iterate with frozen loads.  Has no effect unless the
+                    outer-loop script explicitly sets aeroelastic_qblade.freeze_mode = True.
+                    Full time-domain evaluations at every iteration are preserved when
+                    this flag is False (the default).
             qblade_file: 
                 type: string
                 default: 'Tower'

@@ -39,7 +39,7 @@ def load_cached_cases(sql_path):
 
 def run_weis(fname_wt_input, fname_modeling_options, fname_opt_options, 
              geometry_override=None, modeling_override=None, analysis_override=None, 
-             prepMPI=False, maxnP=1):
+             prepMPI=False, maxnP=1, setup_only=False):
     # Load all yaml inputs and validate (also fills in defaults)
     wt_initial = WindTurbineOntologyPythonWEIS(
         fname_wt_input,
@@ -258,6 +258,29 @@ def run_weis(fname_wt_input, fname_modeling_options, fname_opt_options,
                     checks = wt_opt.check_partials(compact_print=True)
 
             sys.stdout.flush()
+            # If setup_only is requested (e.g. by an outer-loop script), return the
+            # fully-initialised problem here without running model or driver.
+            # The caller is responsible for run_model()/run_driver() and post-processing.
+            if setup_only:
+                return wt_opt, wt_initial, modeling_options, opt_options, myopt, folder_output, rank
+
+            # Fixed-load single-freeze mode: when freeze_loads is True and we are
+            # optimizing, run the model once so QBlade computes and snapshots the
+            # loads, then engage freeze_mode before handing control to the optimizer.
+            # Every subsequent model evaluation inside run_driver() will return the
+            # frozen loads without executing QBlade.
+            # Only applies in the sequential (non-MPI) path; the outer-loop script
+            # handles the multi-iteration case and MPI is a future extension.
+            if (modeling_options['QBlade'].get('freeze_loads', False)
+                    and opt_options['opt_flag']
+                    and not MPI):
+                print("[run_weis] freeze_loads=True: running QBlade once to compute and freeze loads...")
+                sys.stdout.flush()
+                wt_opt.run_model()
+                wt_opt.model.aeroelastic_qblade.freeze_mode = True
+                print("[run_weis] Loads frozen. Proceeding to optimizer with fixed loads.")
+                sys.stdout.flush()
+
             # Run openmdao problem
             if opt_options['opt_flag']:
                 wt_opt.run_driver()
