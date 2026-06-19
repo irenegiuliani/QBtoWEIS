@@ -55,4 +55,4 @@ driver:
 recorder:
     flag: True              # Flag to activate OpenMDAO recorder
     file_name: log_iea22mw_umaine.sql  # Name of OpenMDAO recorder
-    includes: ['floatingse.platform_mass', 'tower_fatigue_post.damage_25y']
+    includes: ['floatingse.platform_mass', 'aeroelastic_qblade.tower_fatigue_damage_25y']

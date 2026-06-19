@@ -49,7 +49,7 @@ driver:
   optimization:
     flag: True
     tol: 1.e-3            # Optimality tolerance
-    max_iter: 20          # Maximum number of iterations (SLSQP)
+    max_iter: 2          # Maximum number of iterations (SLSQP)
     solver: LN_COBYLA     # Optimization solver. Other options are 'SLSQP' - 'CONMIN'
     
 recorder:
@@ -57,9 +57,7 @@ recorder:
     file_name: log_iea22mw_umaine.sql  # Name of OpenMDAO recorder
     includes: [
     'floatingse.platform_mass', 
-    'tower_fatigue_post.damage_25y',
-    'tower_fatigue_post.case_probability',
-    'aeroelastic_qblade.case_probability',
-    'tower_fatigue_post.case_duration',
-    'tower_fatigue_post.case_n_samples',
+    'aeroelastic_qblade.tower_fatigue_damage_25y',
+    'aeroelastic_qblade.tower_fatigue_constr',
+    'aeroelastic_qblade.tower_fatigue_damage_25y_theta',
     ]

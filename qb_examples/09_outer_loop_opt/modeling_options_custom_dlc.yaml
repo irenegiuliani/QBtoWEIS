@@ -216,8 +216,8 @@ DLC_driver:
         #   analysis_time: 60.0  # 10.
         - DLC: "Custom"
           n_seeds: 2
-          transient_time: 100.0 
-          analysis_time: 100.0
+          transient_time: 10.0 
+          analysis_time: 10.0
   
           wind_speed:    [6.0,  6.0,  8.0]
           wave_height:   [1.1,  1.8,  1.4]

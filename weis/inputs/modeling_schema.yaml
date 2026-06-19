@@ -335,7 +335,7 @@ properties:
                         description: Normalize case probabilities inside the fatigue component.
                     check_probability_sum:
                         type: boolean
-                        default: True
+                        default: False
                         description: Require case probabilities to sum to one unless normalize_probabilities is enabled.
     OpenFAST: &of_modopt
         type: object

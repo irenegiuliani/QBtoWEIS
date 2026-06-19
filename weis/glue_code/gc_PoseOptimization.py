@@ -398,7 +398,7 @@ class PoseOptimizationWEIS(PoseOptimization):
             if not tower_fatigue_enabled:
                 raise Exception('Please set QBlade.tower_fatigue.flag to True if you are trying to optimize with tower_fatigue damage constraint.')
 
-            wt_opt.model.add_constraint('tower_fatigue_post.constr_fatigue', upper=tower_fatigue_constraints['max'])
+            wt_opt.model.add_constraint('aeroelastic_qblade.tower_fatigue_constr', upper=tower_fatigue_constraints['max'])
 
         return wt_opt
 
