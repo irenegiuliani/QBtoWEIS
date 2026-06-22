@@ -17,7 +17,10 @@ must be selected consistently with the welded detail class and stress unit.
 """
 
 import numpy as np
-
+from scipy.interpolate import PchipInterpolator
+from openmdao.api import ExplicitComponent
+import wisdem.commonse.utilities as util
+from wisdem.commonse.cylinder_member import get_nfull
 try:
     import fatpack
 except ImportError as err:
@@ -295,3 +298,221 @@ def finalize_tower_fatigue_outputs(damage_theta, fatigue_options):
     damage_sec = np.max(damage_theta, axis=1)
     constr_fatigue = fatigue_design_factor * damage_sec
     return damage_theta, damage_sec, constr_fatigue
+
+
+class TowerFatiguePostComp(ExplicitComponent):
+    """
+    OpenMDAO component for tower fatigue post-processing.
+
+    This component does not run QBlade.
+    It receives QBlade tower load time series through a discrete input and
+    recomputes tower fatigue damage from the current tower geometry.
+    """
+
+    def initialize(self):
+        self.options.declare("modeling_options")
+
+    def setup(self):
+        modopt = self.options["modeling_options"]
+
+        n_height_tow = modopt["WISDEM"]["TowerSE"]["n_height"]
+        n_full_tow = get_nfull(
+            n_height_tow,
+            nref=modopt["WISDEM"]["TowerSE"]["n_refine"],
+        )
+
+        fatigue_options = modopt["QBlade"].get("tower_fatigue", {})
+        self.n_sec_tower_fatigue = n_full_tow - 1
+        self.n_theta_tower_fatigue = fatigue_options.get("n_theta", 36)
+
+        self.add_input(
+            "tower_z_full",
+            val=np.zeros(n_full_tow),
+            units="m",
+            desc="Full refined tower z-grid from TowerSE.",
+        )
+        self.add_input(
+            "twr:z",
+            val=np.zeros(n_height_tow),
+            units="m",
+            desc="Tower nodal z-grid.",
+        )
+        self.add_input(
+            "twr:outer_diameter",
+            val=np.zeros(n_height_tow),
+            units="m",
+            desc="Current tower outer diameter at tower nodes.",
+        )
+        self.add_input(
+            "twr:wall_thickness",
+            val=np.zeros(n_height_tow - 1),
+            units="m",
+            desc="Current tower wall thickness by tower section.",
+        )
+
+        self.add_discrete_input("tower_fatigue_ts", val={})
+
+        self.add_output(
+            "tower_fatigue_damage_25y",
+            val=np.zeros(self.n_sec_tower_fatigue),
+            desc="Maximum lifetime Miner damage over theta by tower section.",
+        )
+        self.add_output(
+            "tower_fatigue_constr",
+            val=np.zeros(self.n_sec_tower_fatigue),
+            desc="Tower fatigue utilization constraint by section.",
+        )
+        self.add_output(
+            "tower_fatigue_damage_25y_theta",
+            val=np.zeros((self.n_sec_tower_fatigue, self.n_theta_tower_fatigue)),
+            desc="Lifetime Miner damage by tower section and circumferential point.",
+        )
+
+        self.declare_partials("*", "*", method="fd")
+
+    def _tower_time_series_channel_names(self):
+        stations = [f"{station:.3f}" for station in np.linspace(0.1, 0.9, 9)]
+        return {
+            "Fx": ["X_tb For. TWR Bot. Constr."]
+            + [f"X_l For. TWR pos {station}" for station in stations]
+            + ["X_tt For. TWR Top Constr."],
+            "Fy": ["Y_tb For. TWR Bot. Constr."]
+            + [f"Y_l For. TWR pos {station}" for station in stations]
+            + ["Y_tt For. TWR Top Constr."],
+            "Fz": ["Z_tb For. TWR Bot. Constr."]
+            + [f"Z_l For. TWR pos {station}" for station in stations]
+            + ["Z_tt For. TWR Top Constr."],
+            "Mx": ["X_tb Mom. TWR Bot. Constr."]
+            + [f"X_l Mom. TWR pos {station}" for station in stations]
+            + ["X_tt Mom. TWR Top Constr."],
+            "My": ["Y_tb Mom. TWR Bot. Constr."]
+            + [f"Y_l Mom. TWR pos {station}" for station in stations]
+            + ["Y_tt Mom. TWR Top Constr."],
+            "Mz": ["Z_tb Mom. TWR Bot. Constr."]
+            + [f"Z_l Mom. TWR pos {station}" for station in stations]
+            + ["Z_tt Mom. TWR Top Constr."],
+        }
+
+    def _tower_fatigue_helper_options(self):
+        fatigue_options = self.options["modeling_options"]["QBlade"].get(
+            "tower_fatigue", {}
+        )
+        return {
+            "n_theta": fatigue_options.get("n_theta", 36),
+            "lifetime_years": fatigue_options.get("lifetime_years", 25.0),
+            "fatigue_design_factor": fatigue_options.get(
+                "fatigue_design_factor", 1.0
+            ),
+            "sn_model": fatigue_options.get("sn_model", "single_slope"),
+            "sn_slope": fatigue_options.get("sn_slope", 3.0),
+            "sn_intercept": fatigue_options.get("sn_intercept", 10.0**12.164),
+            "dnv_m1": fatigue_options.get("dnv_m1", 3.0),
+            "dnv_loga1": fatigue_options.get("dnv_loga1", 12.010),
+            "dnv_m2": fatigue_options.get("dnv_m2", 5.0),
+            "dnv_loga2": fatigue_options.get("dnv_loga2", 15.350),
+            "dnv_n_switch": fatigue_options.get("dnv_n_switch", 1.0e7),
+            "stress_unit": fatigue_options.get("stress_unit", "MPa"),
+            "apply_thickness_correction": fatigue_options.get(
+                "apply_thickness_correction", True
+            ),
+            "t_ref": fatigue_options.get("t_ref", 0.025),
+            "k_thickness": fatigue_options.get("k_thickness", 0.20),
+            "rainflow_bins": fatigue_options.get("rainflow_bins", 128),
+            "normalize_probabilities": fatigue_options.get(
+                "normalize_probabilities", False
+            ),
+            "check_probability_sum": fatigue_options.get(
+                "check_probability_sum", False
+            ),
+        }
+
+    def compute(self, inputs, outputs, discrete_inputs, discrete_outputs):
+        outputs["tower_fatigue_damage_25y"] = np.zeros_like(
+            outputs["tower_fatigue_damage_25y"]
+        )
+        outputs["tower_fatigue_constr"] = np.zeros_like(
+            outputs["tower_fatigue_constr"]
+        )
+        outputs["tower_fatigue_damage_25y_theta"] = np.zeros_like(
+            outputs["tower_fatigue_damage_25y_theta"]
+        )
+
+        payload = discrete_inputs["tower_fatigue_ts"]
+
+        if not payload:
+            return
+
+        chan_time = payload.get("chan_time", [])
+        active_ids = payload.get("active_ids", [])
+        probabilities = payload.get("probabilities", [])
+        case_durations = payload.get("case_durations", {})
+
+        if not chan_time or len(active_ids) == 0:
+            return
+
+        fatigue_options = self._tower_fatigue_helper_options()
+        fatigue_probabilities = prepare_tower_fatigue_probabilities(
+            probabilities,
+            fatigue_options,
+        )
+
+        z_full = inputs["z_full"]
+        outer_diameter_full = inputs["outer_diameter_full"]
+        t_full = inputs["t_full"]
+
+        z_sec, _ = util.nodal2sectional(z_full)
+        section_D, _ = util.nodal2sectional(outer_diameter_full)
+        section_t = t_full
+
+        tower_grid = np.linspace(0.0, 1.0, 11)
+        channel_names = self._tower_time_series_channel_names()
+
+        damage_theta = np.zeros_like(outputs["tower_fatigue_damage_25y_theta"])
+
+        for i_out, case_id in enumerate(active_ids):
+            if i_out >= len(chan_time):
+                continue
+
+            if fatigue_probabilities[i_out] <= 0.0:
+                continue
+
+            timeseries = chan_time[i_out]
+
+            case_section_loads = {}
+
+            for load_key in ("Fz", "Mx", "My"):
+                station_values = np.vstack(
+                    [timeseries[channel] for channel in channel_names[load_key]]
+                )
+
+                # QBladeWrapper scales force and moment channels from N/Nm to kN/kNm
+                # for pCrunch. Convert back to SI units expected by the fatigue helper.
+                station_values *= 1.0e3
+
+                interpolator = PchipInterpolator(
+                    tower_grid,
+                    station_values,
+                    axis=0,
+                )
+                case_section_loads[load_key] = interpolator(z_target)
+
+            add_tower_fatigue_case_damage(
+                damage_theta,
+                case_section_loads["Fz"],
+                case_section_loads["Mx"],
+                case_section_loads["My"],
+                section_D,
+                section_t,
+                fatigue_probabilities[i_out],
+                case_durations[int(case_id)],
+                fatigue_options,
+            )
+
+        damage_theta, damage_sec, constr_fatigue = finalize_tower_fatigue_outputs(
+            damage_theta,
+            fatigue_options,
+        )
+
+        outputs["tower_fatigue_damage_25y_theta"] = damage_theta
+        outputs["tower_fatigue_damage_25y"] = damage_sec
+        outputs["tower_fatigue_constr"] = constr_fatigue

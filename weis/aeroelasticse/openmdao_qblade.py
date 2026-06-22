@@ -481,6 +481,7 @@ class QBLADELoadCases(ExplicitComponent):
         self.add_output('qblade_failed',             val=0.0, desc="Numerical value for whether any qblade runs failed. 0 if false, 2 if true")
 
         self.add_discrete_output('ts_out_dir', val={})
+        self.add_discrete_output("tower_fatigue_ts", val={})
 
     def compute(self, inputs, outputs, discrete_inputs, discrete_outputs):
         print("############################################################")
@@ -821,6 +822,81 @@ class QBLADELoadCases(ExplicitComponent):
         outputs['tower_fatigue_damage_25y_theta'] = damage_theta
         outputs['tower_fatigue_damage_25y'] = damage_sec
         outputs['tower_fatigue_constr'] = constr_fatigue
+
+    def _build_tower_fatigue_ts_payload(
+        self,
+        chan_time,
+        dlc_generator,
+        discrete_inputs,
+        failed_sim_ids=None,
+    ):
+        """
+        Build the discrete payload passed to the external tower fatigue component.
+
+        This payload contains QBlade time histories and case metadata only.
+        It does not contain stress, damage, or fatigue constraints.
+        """
+        if failed_sim_ids is None:
+            failed_sim_ids = []
+        else:
+            failed_sim_ids = list(failed_sim_ids)
+
+        if not chan_time:
+            return {}
+
+        if dlc_generator is not None:
+            n_cases = dlc_generator.n_cases
+        elif self.qb_vt["QSim"]["WNDTYPE"] == 1:
+            n_cases = len(self.qb_vt["QTurbSim"]["URef"])
+        else:
+            n_cases = len(self.qb_vt["QSim"]["MEANINF"])
+
+        successful_cases = np.delete(np.arange(n_cases), failed_sim_ids)
+        case_to_timeseries = {
+            int(case_id): chan_time[i_ts]
+            for i_ts, case_id in enumerate(successful_cases)
+        }
+
+        active_ids, probabilities = self._get_tower_fatigue_active_cases_and_probabilities(
+            dlc_generator,
+            failed_sim_ids,
+            discrete_inputs,
+        )
+
+        if len(active_ids) == 0:
+            return {}
+
+        active_chan_time = []
+        active_case_ids = []
+        active_probabilities = []
+        case_durations = {}
+
+        for i_out, case_id in enumerate(active_ids):
+            case_id = int(case_id)
+
+            if case_id not in case_to_timeseries:
+                continue
+
+            timeseries = case_to_timeseries[case_id]
+
+            active_chan_time.append(timeseries)
+            active_case_ids.append(case_id)
+            active_probabilities.append(float(probabilities[i_out]))
+            case_durations[case_id] = self._get_tower_fatigue_case_duration(
+                case_id,
+                timeseries,
+                dlc_generator,
+            )
+
+        if len(active_case_ids) == 0:
+            return {}
+
+        return {
+            "chan_time": active_chan_time,
+            "active_ids": active_case_ids,
+            "probabilities": np.asarray(active_probabilities, dtype=float),
+            "case_durations": case_durations,
+        }
 
     def _normalize_qblade_ocean_hydro_coefficients(self, qb_vt, modopt):
         qbo = qb_vt.get('QBladeOcean', {})
@@ -2567,12 +2643,18 @@ class QBLADELoadCases(ExplicitComponent):
             if self.options['modeling_options']['flags']['blade']:
                 outputs = self.get_blade_loading(summary_stats, extreme_table, inputs, outputs)
                 outputs = self.get_rotor_loading(summary_stats, outputs)
+
             if self.options['modeling_options']['flags']['tower']:
                 outputs = self.get_tower_loading(summary_stats, extreme_table, inputs, outputs)
+
                 if self.tower_fatigue_post:
-                    self._compute_tower_fatigue_from_chan_time(
-                        inputs, outputs, chan_time, dlc_generator, discrete_inputs, failed_sim_ids
+                    discrete_outputs["tower_fatigue_ts"] = self._build_tower_fatigue_ts_payload(
+                        chan_time,
+                        dlc_generator,
+                        discrete_inputs,
+                        failed_sim_ids,
                     )
+
             if modopt['flags']['monopile']:
                 try:
                     outputs = self.get_monopile_loading(summary_stats, extreme_table, inputs, outputs)

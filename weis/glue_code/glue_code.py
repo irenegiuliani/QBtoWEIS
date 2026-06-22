@@ -27,6 +27,7 @@ from wisdem.inputs import load_yaml
 from wisdem.commonse.cylinder_member import get_nfull
 
 from weis.aeroelasticse.openmdao_qblade import QBLADELoadCases
+from weis.aeroelasticse.tower_fatigue_post import TowerFatiguePostComp
 try:
     from weis.gebt.sonata_wrapper import SONATA_WEIS
 except ImportError:
@@ -393,7 +394,17 @@ class WindPark(om.Group):
                 n_refine = modeling_options['WISDEM']['TowerSE']["n_refine"]
                 n_full = get_nfull(n_height, nref=n_refine)
                 self.add_subsystem('towerse_post',   CylinderPostFrame(modeling_options=modeling_options["WISDEM"]["TowerSE"], n_dlc=1, n_full = n_full))
-            
+                self.add_subsystem('tower_fatigue_post', TowerFatiguePostComp(modeling_options=modeling_options,))
+                self.connect("towerse.z_full", "tower_fatigue_post.z_full")
+                self.connect("towerse.outer_diameter_full", "tower_fatigue_post.outer_diameter_full")
+                self.connect("towerse.t_full", "tower_fatigue_post.t_full")
+                self.connect(
+                    "aeroelastic_qblade.tower_fatigue_ts",
+                    "tower_fatigue_post.tower_fatigue_ts",
+                )
+
+
+
             if modeling_options["flags"]["monopile"]:
                 n_height = modeling_options['WISDEM']['FixedBottomSE']["n_height"]
                 n_refine = modeling_options['WISDEM']['FixedBottomSE']["n_refine"]
