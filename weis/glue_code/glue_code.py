@@ -395,9 +395,9 @@ class WindPark(om.Group):
                 n_full = get_nfull(n_height, nref=n_refine)
                 self.add_subsystem('towerse_post',   CylinderPostFrame(modeling_options=modeling_options["WISDEM"]["TowerSE"], n_dlc=1, n_full = n_full))
                 self.add_subsystem('tower_fatigue_post', TowerFatiguePostComp(modeling_options=modeling_options,))
-                self.connect("towerse.z_full", "tower_fatigue_post.z_full")
-                self.connect("towerse.outer_diameter_full", "tower_fatigue_post.outer_diameter_full")
-                self.connect("towerse.t_full", "tower_fatigue_post.t_full")
+                for k in ["z_full", "outer_diameter_full", "t_full"]:
+                    self.connect(f"towerse.{k}", f"tower_fatigue_post.{k}")
+
                 self.connect(
                     "aeroelastic_qblade.tower_fatigue_ts",
                     "tower_fatigue_post.tower_fatigue_ts",

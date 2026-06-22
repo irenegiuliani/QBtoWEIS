@@ -393,7 +393,7 @@ class PoseOptimizationWEIS(PoseOptimization):
                 raise Exception('Please turn on the call to QBlade if you are trying to optimize with tower_fatigue damage constraint.')
             tower_fatigue_enabled = self.modeling['QBlade'].get('tower_fatigue', {}).get(
                 'flag',
-                self.modeling['General']['qblade_configuration'].get('tower_fatigue_post', False),
+                False,
             )
             if not tower_fatigue_enabled:
                 raise Exception('Please set QBlade.tower_fatigue.flag to True if you are trying to optimize with tower_fatigue damage constraint.')

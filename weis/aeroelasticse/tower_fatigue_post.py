@@ -326,28 +326,24 @@ class TowerFatiguePostComp(ExplicitComponent):
         self.n_theta_tower_fatigue = fatigue_options.get("n_theta", 36)
 
         self.add_input(
-            "tower_z_full",
+            "z_full",
             val=np.zeros(n_full_tow),
             units="m",
             desc="Full refined tower z-grid from TowerSE.",
         )
+
         self.add_input(
-            "twr:z",
-            val=np.zeros(n_height_tow),
+            "outer_diameter_full",
+            val=np.zeros(n_full_tow),
             units="m",
-            desc="Tower nodal z-grid.",
+            desc="Full refined tower outer diameter from TowerSE.",
         )
+
         self.add_input(
-            "twr:outer_diameter",
-            val=np.zeros(n_height_tow),
+            "t_full",
+            val=np.zeros(n_full_tow - 1),
             units="m",
-            desc="Current tower outer diameter at tower nodes.",
-        )
-        self.add_input(
-            "twr:wall_thickness",
-            val=np.zeros(n_height_tow - 1),
-            units="m",
-            desc="Current tower wall thickness by tower section.",
+            desc="Full refined tower wall thickness by section from TowerSE.",
         )
 
         self.add_discrete_input("tower_fatigue_ts", val={})
@@ -463,6 +459,8 @@ class TowerFatiguePostComp(ExplicitComponent):
         z_sec, _ = util.nodal2sectional(z_full)
         section_D, _ = util.nodal2sectional(outer_diameter_full)
         section_t = t_full
+
+        z_target = (z_sec - z_sec[0]) / (z_sec[-1] - z_sec[0])
 
         tower_grid = np.linspace(0.0, 1.0, 11)
         channel_names = self._tower_time_series_channel_names()
