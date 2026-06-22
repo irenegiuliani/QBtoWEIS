@@ -469,13 +469,6 @@ class QBLADELoadCases(ExplicitComponent):
         if self.tower_fatigue_post:
             self.n_sec_tower_fatigue = n_full_tow - 1
             self.n_theta_tower_fatigue = tower_fatigue_options.get('n_theta', 36)
-            self.add_output('tower_fatigue_damage_25y', val=np.zeros(self.n_sec_tower_fatigue),
-                            desc='Maximum lifetime Miner damage over theta by tower section.')
-            self.add_output('tower_fatigue_constr', val=np.zeros(self.n_sec_tower_fatigue),
-                            desc='Tower fatigue utilization constraint by section.')
-            self.add_output('tower_fatigue_damage_25y_theta',
-                            val=np.zeros((self.n_sec_tower_fatigue, self.n_theta_tower_fatigue)),
-                            desc='Lifetime Miner damage by tower section and circumferential point.')
 
         # Simulation output
         self.add_output('qblade_failed',             val=0.0, desc="Numerical value for whether any qblade runs failed. 0 if false, 2 if true")
