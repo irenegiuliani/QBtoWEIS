@@ -391,12 +391,16 @@ class PoseOptimizationWEIS(PoseOptimization):
         if tower_fatigue_constraints['flag']:
             if self.modeling['QBlade']['flag'] != True:
                 raise Exception('Please turn on the call to QBlade if you are trying to optimize with tower_fatigue damage constraint.')
+            if not self.modeling['flags']['tower']:
+                raise Exception('Please set flags.tower to True if you are trying to optimize with tower_fatigue damage constraint.')
             tower_fatigue_enabled = self.modeling['QBlade'].get('tower_fatigue', {}).get(
                 'flag',
                 False,
             )
             if not tower_fatigue_enabled:
                 raise Exception('Please set QBlade.tower_fatigue.flag to True if you are trying to optimize with tower_fatigue damage constraint.')
+            if self.modeling['QBlade']['from_qblade']:
+                raise Exception('Please set QBlade.from_qblade to False if you are trying to optimize with tower_fatigue damage constraint.')
 
             wt_opt.model.add_constraint(
                 'tower_fatigue_post.tower_fatigue_constr',

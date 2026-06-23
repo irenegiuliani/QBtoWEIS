@@ -131,12 +131,12 @@ properties:
                     tower_fatigue_post:
                         type: boolean
                         default: False
-                        description: Expose padded QBlade tower sectional load time histories as OpenMDAO outputs for downstream tower fatigue post-processing.
+                        description: Legacy unused option. Strategy 2 tower fatigue is enabled with QBlade.tower_fatigue.flag.
                     tower_fatigue_max_cases:
                         type: integer
                         default: 0
                         minimum: 0
-                        description: Optional upper bound for the number of QBlade cases stored in tower fatigue time-history outputs. If zero, WEIS attempts to infer the case count during setup.
+                        description: Legacy unused option. Strategy 2 sizes tower fatigue outputs from DLC_driver.n_cases.
                     store_turbines:
                         type: boolean
                         default: False
@@ -278,6 +278,11 @@ properties:
                         type: boolean
                         default: False
                         description: Enable QBlade tower sectional fatigue post-processing.
+                    n_time_max:
+                        type: integer
+                        default: 92500
+                        minimum: 3
+                        description: Maximum number of stored time samples per QBlade tower fatigue case.
                     n_theta:
                         type: integer
                         default: 36
@@ -294,6 +299,11 @@ properties:
                         default: 1.0
                         minimum: 0.0
                         description: Multiplier applied to fatigue damage for the utilization constraint.
+                    sn_model:
+                        type: string
+                        default: single_slope
+                        enum: [single_slope, dnv_bilinear]
+                        description: S-N model used by the tower fatigue post-processing helper.
                     sn_slope:
                         type: number
                         default: 3.0
@@ -304,6 +314,29 @@ properties:
                         default: 1.459e+12
                         minimum: 0.0
                         description: S-N curve intercept in N = A / S**m form, using the selected stress_unit.
+                    dnv_m1:
+                        type: number
+                        default: 3.0
+                        minimum: 0.0
+                        description: First inverse-slope parameter for the dnv_bilinear S-N model.
+                    dnv_loga1:
+                        type: number
+                        default: 12.010
+                        description: First log10 intercept for the dnv_bilinear S-N model.
+                    dnv_m2:
+                        type: number
+                        default: 5.0
+                        minimum: 0.0
+                        description: Second inverse-slope parameter for the dnv_bilinear S-N model.
+                    dnv_loga2:
+                        type: number
+                        default: 15.350
+                        description: Second log10 intercept for the dnv_bilinear S-N model.
+                    dnv_n_switch:
+                        type: number
+                        default: 1.0e+7
+                        minimum: 0.0
+                        description: Cycle count where the dnv_bilinear S-N model switches slope.
                     stress_unit:
                         type: string
                         default: MPa

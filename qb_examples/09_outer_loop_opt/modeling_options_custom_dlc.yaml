@@ -12,7 +12,7 @@ General:
         qbtoweis_output_filter: QBtoWEIS_output_filter.txt
         out_file_format: 2              # 1 = ASCII (.out), 2 = Binary (.outb), default setting is 2 and does not specifically need to be set
         delete_out_files: True          # .out/.outb files are deleted after processing if True, default setting is True and does not specifically need to be set
-        number_of_workers: 2
+        number_of_workers: 3
         model_only: False
         store_qprs: False
         
@@ -57,6 +57,7 @@ QBlade:                         # Options for WEIS fidelity, nonlinear time doma
         rainflow_bins: 128
         normalize_probabilities: false
         check_probability_sum: false
+        n_time_max: 10000
     simulation:
         Simulate: True
         DLCGenerator: True

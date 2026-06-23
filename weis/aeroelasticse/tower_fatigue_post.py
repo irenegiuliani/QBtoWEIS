@@ -2,13 +2,19 @@
 Tower fatigue post-processing from sectional load time series.
 
 This module intentionally lives in WEIS/QBtoWEIS rather than WISDEM.  The
-component only uses OpenMDAO inputs passed to it and does not depend on QBlade
-or WISDEM internals.
+component receives continuous numeric OpenMDAO inputs from the QBlade load
+component and does not read QBlade ``chan_time`` dictionaries or discrete
+payloads.
 
 The current fatigue calculation reconstructs normal stress from axial force
-``Fz`` and biaxial bending moments ``Mx`` and ``My``.  ``Fx``, ``Fy``, and
-``Mz`` are accepted as inputs for interface consistency with sectional QBlade
-loads and for future shear/torsion fatigue extensions.
+``Fz`` and biaxial bending moments ``Mx`` and ``My``. ``Fx``, ``Fy``, and
+``Mz`` are not included in the current implementation.
+
+Limitations of the current implementation:
+- no shear fatigue;
+- no torsional fatigue;
+- no mean-stress correction;
+- no full multiaxial fatigue model.
 
 The default S-N model, ``single_slope``, is a simple preliminary model using
 ``N = A / Delta_sigma_eff**m``.  The ``dnv_bilinear`` option is reserved for a
@@ -363,9 +369,40 @@ class TowerFatiguePostComp(ExplicitComponent):
         self.add_output("tower_fatigue_damage_25y_theta", val=np.zeros((self.n_sec_tower_fatigue, self.n_theta_tower_fatigue)), desc="Lifetime Miner damage by tower section and circumferential point.")
 
         self.declare_partials(
-            of=["tower_fatigue_damage_25y", "tower_fatigue_constr", "tower_fatigue_damage_25y_theta"],
-            wrt=["z_full", "outer_diameter_full", "t_full"],
-            method="fd")
+            of=[
+                "tower_fatigue_damage_25y",
+                "tower_fatigue_constr",
+                "tower_fatigue_damage_25y_theta",
+            ],
+            wrt=[
+                "z_full",
+                "outer_diameter_full",
+                "t_full",
+            ],
+            method="fd",
+        )
+        for name in [
+            "tower_fatigue_Fz_ts",
+            "tower_fatigue_Mx_ts",
+            "tower_fatigue_My_ts",
+            "tower_fatigue_n_time",
+            "tower_fatigue_active",
+            "tower_fatigue_probability",
+            "tower_fatigue_duration",
+            "tower_fatigue_case_id",
+        ]:
+            try:
+                self.declare_partials(
+                    of=[
+                        "tower_fatigue_damage_25y",
+                        "tower_fatigue_constr",
+                        "tower_fatigue_damage_25y_theta",
+                    ],
+                    wrt=name,
+                    dependent=False,
+                )
+            except TypeError:
+                pass
         
     def _tower_fatigue_helper_options(self):
         fatigue_options = self.options["modeling_options"]["QBlade"].get(
@@ -400,7 +437,7 @@ class TowerFatiguePostComp(ExplicitComponent):
             ),
         }
 
-    def compute(self, inputs, outputs, discrete_inputs, discrete_outputs):
+    def compute(self, inputs, outputs):
         outputs["tower_fatigue_damage_25y"] = np.zeros_like(
             outputs["tower_fatigue_damage_25y"]
         )
@@ -415,46 +452,116 @@ class TowerFatiguePostComp(ExplicitComponent):
         probabilities = np.asarray(inputs["tower_fatigue_probability"], dtype=float)
         durations = np.asarray(inputs["tower_fatigue_duration"], dtype=float)
         n_time_vec = np.asarray(inputs["tower_fatigue_n_time"], dtype=float)
+        case_ids = np.asarray(inputs["tower_fatigue_case_id"], dtype=float)
 
-        if not np.any(active > 0.5):
-            return
+        metadata = {
+            "tower_fatigue_active": active,
+            "tower_fatigue_probability": probabilities,
+            "tower_fatigue_duration": durations,
+            "tower_fatigue_n_time": n_time_vec,
+            "tower_fatigue_case_id": case_ids,
+        }
+        for name, values in metadata.items():
+            if not np.all(np.isfinite(values)):
+                raise ValueError(f"{name} must contain only finite values.")
 
         fatigue_options = self._tower_fatigue_helper_options()
         active_mask = active > 0.5
+        if not np.any(active_mask):
+            raise RuntimeError("Tower fatigue post-processing received no active QBlade fatigue cases.")
+
+        n_time_alloc = inputs["tower_fatigue_Fz_ts"].shape[2]
+        active_probabilities = probabilities[active_mask]
+        active_durations = durations[active_mask]
+        active_n_time = n_time_vec[active_mask]
+
+        if np.any(active_probabilities < 0.0):
+            bad_cases = [
+                (int(i), int(round(case_ids[i])))
+                for i in np.where(active_mask & (probabilities < 0.0))[0]
+            ]
+            raise ValueError(
+                "Active tower_fatigue_probability entries must be non-negative. "
+                f"Bad (slot, case_id): {bad_cases}"
+            )
+        if np.any(active_durations <= 0.0):
+            bad_cases = [
+                (int(i), int(round(case_ids[i])))
+                for i in np.where(active_mask & (durations <= 0.0))[0]
+            ]
+            raise ValueError(
+                "Active tower_fatigue_duration entries must be positive. "
+                f"Bad (slot, case_id): {bad_cases}"
+            )
+        if np.any(active_n_time < 3.0):
+            bad_cases = [
+                (int(i), int(round(case_ids[i])))
+                for i in np.where(active_mask & (n_time_vec < 3.0))[0]
+            ]
+            raise ValueError(
+                "Active tower_fatigue_n_time entries must be at least 3. "
+                f"Bad (slot, case_id): {bad_cases}"
+            )
+        if np.any(active_n_time > n_time_alloc):
+            bad_cases = [
+                (int(i), int(round(case_ids[i])))
+                for i in np.where(active_mask & (n_time_vec > n_time_alloc))[0]
+            ]
+            raise ValueError(
+                f"Active tower_fatigue_n_time entries must not exceed allocated time dimension "
+                f"{n_time_alloc}. Bad (slot, case_id): {bad_cases}"
+            )
+
         fatigue_probabilities = prepare_tower_fatigue_probabilities(
-            probabilities[active_mask],
+            active_probabilities,
             fatigue_options,
         )
 
-        z_full = inputs["z_full"]
-        outer_diameter_full = inputs["outer_diameter_full"]
-        t_full = inputs["t_full"]
+        z_full = np.asarray(inputs["z_full"], dtype=float)
+        outer_diameter_full = np.asarray(inputs["outer_diameter_full"], dtype=float)
+        t_full = np.asarray(inputs["t_full"], dtype=float)
+
+        if not np.all(np.isfinite(z_full)):
+            raise ValueError("Tower fatigue geometry input z_full must contain only finite values.")
+        if not np.all(np.isfinite(outer_diameter_full)):
+            raise ValueError("Tower fatigue geometry input outer_diameter_full must contain only finite values.")
+        if not np.all(np.isfinite(t_full)):
+            raise ValueError("Tower fatigue geometry input t_full must contain only finite values.")
 
         z_sec, _ = util.nodal2sectional(z_full)
         section_D, _ = util.nodal2sectional(outer_diameter_full)
-        section_t = np.asarray(t_full, dtype=float)
+        section_t = t_full
+
+        if not np.all(np.isfinite(z_sec)):
+            raise ValueError("Tower fatigue sectional z grid must contain only finite values.")
+        if not np.all(np.diff(z_sec) > 0.0):
+            raise ValueError("Tower fatigue sectional z grid must be strictly increasing.")
+        if z_sec[-1] <= z_sec[0]:
+            raise ValueError("Tower fatigue sectional z grid must have positive height span.")
 
         if section_D.shape != section_t.shape:
             raise ValueError(
                 "Tower fatigue geometry mismatch: section_D and section_t "
                 f"must have the same shape, got {section_D.shape} and {section_t.shape}."
             )
+        if not np.all(np.isfinite(section_D)):
+            raise ValueError("Tower fatigue section_D must contain only finite values.")
+        if not np.all(np.isfinite(section_t)):
+            raise ValueError("Tower fatigue section_t must contain only finite values.")
+        try:
+            tower_tube_section_properties(section_D, section_t)
+        except ValueError as exc:
+            raise ValueError(f"Invalid tower fatigue tube geometry: {exc}") from exc
 
         z_target = (z_sec - z_sec[0]) / (z_sec[-1] - z_sec[0])
         tower_grid = np.linspace(0.0, 1.0, 11)
         damage_theta = np.zeros_like(outputs["tower_fatigue_damage_25y_theta"])
         active_indices = np.where(active_mask)[0]
+        n_processed = 0
 
         for i_local, i_case in enumerate(active_indices):
+            case_id = int(round(case_ids[i_case]))
             n_time = int(round(n_time_vec[i_case]))
-
-            if n_time < 3:
-                continue
-
-            if durations[i_case] <= 0.0:
-                raise ValueError(
-                    f"tower_fatigue_duration must be positive for active case slot {i_case}."
-                )
 
             Fz_station = inputs["tower_fatigue_Fz_ts"][i_case, :, :n_time]
             Mx_station = inputs["tower_fatigue_Mx_ts"][i_case, :, :n_time]
@@ -467,6 +574,18 @@ class TowerFatiguePostComp(ExplicitComponent):
                 ("Mx", Mx_station),
                 ("My", My_station),
             ]:
+                expected_shape = (11, n_time)
+                if station_values.shape != expected_shape:
+                    raise ValueError(
+                        f"Tower fatigue load {load_key} for active case slot {i_case} "
+                        f"(case_id={case_id}) must have shape {expected_shape}, "
+                        f"got {station_values.shape}."
+                    )
+                if not np.all(np.isfinite(station_values)):
+                    raise ValueError(
+                        f"Tower fatigue load {load_key} for active case slot {i_case} "
+                        f"(case_id={case_id}) contains non-finite values."
+                    )
                 interpolator = PchipInterpolator(
                     tower_grid,
                     station_values,
@@ -485,6 +604,10 @@ class TowerFatiguePostComp(ExplicitComponent):
                 durations[i_case],
                 fatigue_options,
             )
+            n_processed += 1
+
+        if n_processed == 0:
+            raise RuntimeError("Tower fatigue post-processing did not process any active QBlade fatigue cases.")
 
         damage_theta, damage_sec, constr_fatigue = finalize_tower_fatigue_outputs(
             damage_theta,

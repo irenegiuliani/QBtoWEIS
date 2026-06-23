@@ -356,7 +356,7 @@ class QBLADELoadCases(ExplicitComponent):
         if self.tower_fatigue_post:
             self.n_tower_fatigue_cases = modopt["DLC_driver"]["n_cases"]
             self.n_tower_fatigue_stations = 11
-            self.n_tower_fatigue_time = tower_fatigue_options.get("n_time_max", 92500)        
+            self.n_tower_fatigue_n_time_max = tower_fatigue_options.get("n_time_max", 92500)
         
         if modopt['QBlade']['simulation']['DLCGenerator'] or modopt['QBlade']['simulation']['WNDTYPE']== 1:
             self.wind_directory = os.path.join(self.QBLADE_runDirectory, 'wind')
@@ -435,7 +435,7 @@ class QBLADELoadCases(ExplicitComponent):
             if self.tower_fatigue_post:
                 n_cases_fat = self.n_tower_fatigue_cases
                 n_stations_fat = self.n_tower_fatigue_stations
-                n_time_fat = self.n_tower_fatigue_time
+                n_time_fat = self.n_tower_fatigue_n_time_max
 
                 self.add_output(
                     "tower_fatigue_Fz_ts",
@@ -456,13 +456,6 @@ class QBLADELoadCases(ExplicitComponent):
                     val=np.zeros((n_cases_fat, n_stations_fat, n_time_fat)),
                     units="N*m",
                     desc="Tower y-bending moment time series for fatigue at QBlade tower stations.",
-                )
-
-                self.add_output(
-                    "tower_fatigue_time",
-                    val=np.zeros((n_cases_fat, n_time_fat)),
-                    units="s",
-                    desc="Time vector associated with each tower fatigue time series.",
                 )
 
                 self.add_output(
@@ -644,8 +637,36 @@ class QBLADELoadCases(ExplicitComponent):
         if dlc_generator is not None:
             custom_ids = [i for i, c in enumerate(dlc_generator.cases) if c.label == 'Custom']
             if custom_ids:
+                custom_probabilities_all = np.array(
+                    [dlc_generator.cases[i].probability for i in custom_ids],
+                    dtype=float,
+                )
+                if not np.all(np.isfinite(custom_probabilities_all)):
+                    raise ValueError('Custom DLC tower fatigue probabilities must be finite.')
+                if np.any(custom_probabilities_all < 0.0):
+                    raise ValueError('Custom DLC tower fatigue probabilities must be non-negative.')
+
+                custom_probability_sum = np.sum(custom_probabilities_all)
+                if custom_probability_sum <= 0.0:
+                    raise ValueError('Custom DLC tower fatigue probabilities must contain positive probability mass.')
+
                 active_ids = [i for i in custom_ids if i not in failed_sim_ids]
-                probabilities = np.array([dlc_generator.cases[i].probability for i in active_ids])
+                probabilities = np.array(
+                    [dlc_generator.cases[i].probability for i in active_ids],
+                    dtype=float,
+                )
+                active_probability_sum = np.sum(probabilities)
+                if active_probability_sum <= 0.0:
+                    raise ValueError(
+                        'Remaining Custom DLC tower fatigue probabilities must contain positive probability mass '
+                        'after removing failed QBlade simulations.'
+                    )
+                if active_probability_sum < custom_probability_sum:
+                    logger.warning(
+                        'WARNING: Failed QBlade simulations removed Custom DLC tower fatigue probability mass. '
+                        f'Using remaining probability mass {active_probability_sum:.6f} of '
+                        f'{custom_probability_sum:.6f}.'
+                    )
                 return active_ids, probabilities
 
             active_ids = [i for i in range(dlc_generator.n_cases) if i not in failed_sim_ids]
@@ -699,7 +720,6 @@ class QBLADELoadCases(ExplicitComponent):
         outputs["tower_fatigue_Fz_ts"][:] = 0.0
         outputs["tower_fatigue_Mx_ts"][:] = 0.0
         outputs["tower_fatigue_My_ts"][:] = 0.0
-        outputs["tower_fatigue_time"][:] = 0.0
         outputs["tower_fatigue_n_time"][:] = 0.0
         outputs["tower_fatigue_active"][:] = 0.0
         outputs["tower_fatigue_probability"][:] = 0.0
@@ -739,7 +759,9 @@ class QBLADELoadCases(ExplicitComponent):
         )
 
         if len(active_ids) == 0:
-            return outputs
+            raise RuntimeError(
+                'Tower fatigue is active, but no active QBlade cases remain after failed simulations.'
+            )
 
         fatigue_twr_stations = [f"{station:.3f}" for station in np.linspace(0.1, 0.9, 9)]
         channel_names = {
@@ -747,7 +769,7 @@ class QBLADELoadCases(ExplicitComponent):
             "Mx": ["X_tb Mom. TWR Bot. Constr."] + [f"X_l Mom. TWR pos {station}" for station in fatigue_twr_stations] + ["X_tt Mom. TWR Top Constr."],
             "My": ["Y_tb Mom. TWR Bot. Constr."] + [f"Y_l Mom. TWR pos {station}" for station in fatigue_twr_stations] + ["Y_tt Mom. TWR Top Constr."]}
 
-        n_time_max = outputs["tower_fatigue_time"].shape[1]
+        n_time_max = outputs["tower_fatigue_Fz_ts"].shape[2]
         n_slots = outputs["tower_fatigue_active"].shape[0]
 
         i_slot = 0
@@ -773,6 +795,9 @@ class QBLADELoadCases(ExplicitComponent):
             time = np.asarray(timeseries["Time"], dtype=float)
             n_time = len(time)
 
+            if not np.all(np.isfinite(time)):
+                raise ValueError(f"Time channel for tower fatigue case {case_id} contains non-finite values.")
+
             if n_time < 3:
                 logger.warning(
                     f"WARNING: Tower fatigue case {case_id} has only {n_time} samples. "
@@ -793,12 +818,7 @@ class QBLADELoadCases(ExplicitComponent):
                 dlc_generator,
             )
 
-            outputs["tower_fatigue_time"][i_slot, :n_time] = time
-            outputs["tower_fatigue_n_time"][i_slot] = n_time
-            outputs["tower_fatigue_active"][i_slot] = 1.0
-            outputs["tower_fatigue_probability"][i_slot] = float(probabilities[i_prob])
-            outputs["tower_fatigue_duration"][i_slot] = duration
-            outputs["tower_fatigue_case_id"][i_slot] = float(case_id)
+            case_loads = {}
 
             for load_key, output_name in [
                 ("Fz", "tower_fatigue_Fz_ts"),
@@ -816,22 +836,78 @@ class QBLADELoadCases(ExplicitComponent):
                         f"load {load_key}: {missing}"
                     )
 
-                station_values = np.vstack(
-                    [
-                        np.asarray(timeseries[channel], dtype=float)
-                        for channel in channel_names[load_key]
-                    ]
-                )
+                channel_arrays = []
+                bad_lengths = {}
+                for channel in channel_names[load_key]:
+                    channel_array = np.asarray(timeseries[channel], dtype=float)
+                    if len(channel_array) != n_time:
+                        bad_lengths[channel] = len(channel_array)
+                    channel_arrays.append(channel_array)
+
+                if bad_lengths:
+                    raise ValueError(
+                        f"Tower fatigue channels for case {case_id}, load {load_key}, "
+                        f"must all have length {n_time}. Bad lengths: {bad_lengths}"
+                    )
+                station_values = np.vstack(channel_arrays)
+                if not np.all(np.isfinite(station_values)):
+                    raise ValueError(
+                        f"Tower fatigue channels for case {case_id}, load {load_key}, "
+                        "contain non-finite values."
+                    )
 
                 # QBladeWrapper/pCrunch time-series channels are currently in kN and kN*m.
                 # Store these OpenMDAO fatigue outputs directly in SI units.
-                station_values *= 1.0e3
+                case_loads[output_name] = station_values * 1.0e3
 
+            for output_name, station_values in case_loads.items():
                 outputs[output_name][i_slot, :, :n_time] = station_values
+
+            outputs["tower_fatigue_n_time"][i_slot] = n_time
+            outputs["tower_fatigue_probability"][i_slot] = float(probabilities[i_prob])
+            outputs["tower_fatigue_duration"][i_slot] = duration
+            outputs["tower_fatigue_case_id"][i_slot] = float(case_id)
+            outputs["tower_fatigue_active"][i_slot] = 1.0
 
             i_slot += 1
 
+        if i_slot == 0:
+            raise RuntimeError(
+                'Tower fatigue is active, but no usable QBlade tower fatigue time-series cases were stored.'
+            )
+
         return outputs
+
+    def _check_frozen_tower_fatigue_outputs(self):
+        required = [
+            "tower_fatigue_Fz_ts",
+            "tower_fatigue_Mx_ts",
+            "tower_fatigue_My_ts",
+            "tower_fatigue_n_time",
+            "tower_fatigue_active",
+            "tower_fatigue_probability",
+            "tower_fatigue_duration",
+            "tower_fatigue_case_id",
+        ]
+        missing = [name for name in required if name not in self._frozen_outputs]
+        if missing:
+            raise RuntimeError(
+                f"freeze_loads captured frozen outputs without required tower fatigue outputs: {missing}"
+            )
+
+        active = np.asarray(self._frozen_outputs["tower_fatigue_active"], dtype=float) > 0.5
+        n_active = int(np.count_nonzero(active))
+        probabilities = np.asarray(self._frozen_outputs["tower_fatigue_probability"], dtype=float)
+        n_time = np.asarray(self._frozen_outputs["tower_fatigue_n_time"], dtype=float)
+        probability_sum = float(np.sum(probabilities[active])) if n_active else 0.0
+        max_n_time = int(np.max(n_time[active])) if n_active else 0
+
+        print(
+            "[QBLADELoadCases] Frozen tower fatigue outputs: "
+            f"n_active={n_active}, probability_sum={probability_sum:.6f}, max_n_time={max_n_time}"
+        )
+        if n_active == 0:
+            raise RuntimeError("freeze_loads captured tower fatigue outputs, but no active cases were stored.")
 
     def _normalize_qblade_ocean_hydro_coefficients(self, qb_vt, modopt):
         qbo = qb_vt.get('QBladeOcean', {})
@@ -2583,6 +2659,9 @@ class QBLADELoadCases(ExplicitComponent):
                 outputs = self.get_tower_loading(summary_stats, extreme_table, inputs, outputs)
 
                 if self.tower_fatigue_post:
+                    # QBlade exports frozen tower fatigue load time series and metadata only.
+                    # TowerFatiguePostComp recomputes geometry-dependent fatigue damage
+                    # from current TowerSE geometry.
                     outputs = self._fill_tower_fatigue_outputs(outputs, chan_time, dlc_generator, discrete_inputs, failed_sim_ids)                    
 
             if modopt['flags']['monopile']:
@@ -2623,13 +2702,16 @@ class QBLADELoadCases(ExplicitComponent):
             if modopt['General']['qblade_configuration']['store_turbines']:
                 self.store_turbines()
 
-            # Fixed-load outer-loop: capture outputs so they can be returned frozen on
-            # subsequent optimizer evaluations.  This runs unconditionally when
-            # freeze_loads is True so that the snapshot is always current.
+            # Fixed-load outer-loop: capture QBlade outputs so they can be returned
+            # frozen on subsequent optimizer evaluations. For Strategy 2 tower
+            # fatigue, QBlade freezes load time series and metadata; it must not
+            # freeze geometry-dependent fatigue damage.
             if modopt['QBlade']['freeze_loads']:
-                # Freeze all current QBlade outputs; all needed QBlade loads should
-                # be frozen as in the original formulation.
+                # Freeze all current QBlade outputs, including tower fatigue load
+                # time-series outputs when they are active.
                 self._frozen_outputs = {name: np.copy(outputs[name]) for name in outputs}
+                if self.tower_fatigue_post:
+                    self._check_frozen_tower_fatigue_outputs()
                 freeze_save_dir = os.path.join(self.QBLADE_runDirectory,
                                                'iteration_' + str(self.qb_inumber))
                 os.makedirs(freeze_save_dir, exist_ok=True)

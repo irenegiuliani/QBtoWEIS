@@ -963,6 +963,13 @@ class WindPark(om.Group):
             
             self.add_subsystem('aeroelastic_qblade',       QBLADELoadCases(modeling_options = modeling_options, opt_options = opt_options, wt_init = wt_init, cache=opt_options.get('cache', None)))
             self.add_subsystem('stall_check_of',           NoStallConstraint(modeling_options = modeling_options))
+            qblade_tower_fatigue_enabled = modeling_options["QBlade"].get("tower_fatigue", {}).get("flag", False)
+            if qblade_tower_fatigue_enabled and modeling_options["QBlade"]["from_qblade"]:
+                raise Exception(
+                    "QBlade Strategy 2 tower fatigue requires QBlade.from_qblade: false. "
+                    "The continuous tower fatigue time-series outputs are only declared "
+                    "when WEIS builds the QBlade model."
+                )
 
             if modeling_options['WISDEM']['RotorSE']['flag']: 
                 self.add_subsystem('rlds_post',      RotorLoadsDeflStrainsWEIS(modeling_options = modeling_options, opt_options = opt_options))
@@ -989,7 +996,7 @@ class WindPark(om.Group):
                 n_refine = modeling_options['WISDEM']['TowerSE']["n_refine"]
                 n_full = get_nfull(n_height, nref=n_refine)
                 self.add_subsystem('towerse_post',   CylinderPostFrame(modeling_options=modeling_options["WISDEM"]["TowerSE"], n_dlc=1, n_full = n_full))
-                if modeling_options["QBlade"].get("tower_fatigue", {}).get("flag", False):
+                if qblade_tower_fatigue_enabled:
                     self.add_subsystem(
                         "tower_fatigue_post",
                         TowerFatiguePostComp(modeling_options=modeling_options),
@@ -997,9 +1004,16 @@ class WindPark(om.Group):
                     for k in ["z_full", "outer_diameter_full", "t_full"]:
                         self.connect(f"towerse.{k}", f"tower_fatigue_post.{k}")
 
-                    for k in ["tower_fatigue_Fz_ts", "tower_fatigue_Mx_ts", "tower_fatigue_My_ts",
-                             "tower_fatigue_n_time", "tower_fatigue_active", "tower_fatigue_probability", "tower_fatigue_duration",
-                              "tower_fatigue_case_id"]:
+                    for k in [
+                        "tower_fatigue_Fz_ts",
+                        "tower_fatigue_Mx_ts",
+                        "tower_fatigue_My_ts",
+                        "tower_fatigue_n_time",
+                        "tower_fatigue_active",
+                        "tower_fatigue_probability",
+                        "tower_fatigue_duration",
+                        "tower_fatigue_case_id",
+                    ]:
                         self.connect(
                             f"aeroelastic_qblade.{k}",
                             f"tower_fatigue_post.{k}",
