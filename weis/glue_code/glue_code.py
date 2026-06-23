@@ -394,16 +394,6 @@ class WindPark(om.Group):
                 n_refine = modeling_options['WISDEM']['TowerSE']["n_refine"]
                 n_full = get_nfull(n_height, nref=n_refine)
                 self.add_subsystem('towerse_post',   CylinderPostFrame(modeling_options=modeling_options["WISDEM"]["TowerSE"], n_dlc=1, n_full = n_full))
-                self.add_subsystem('tower_fatigue_post', TowerFatiguePostComp(modeling_options=modeling_options,))
-                for k in ["z_full", "outer_diameter_full", "t_full"]:
-                    self.connect(f"towerse.{k}", f"tower_fatigue_post.{k}")
-
-                self.connect(
-                    "aeroelastic_qblade.tower_fatigue_ts",
-                    "tower_fatigue_post.tower_fatigue_ts",
-                )
-
-
 
             if modeling_options["flags"]["monopile"]:
                 n_height = modeling_options['WISDEM']['FixedBottomSE']["n_height"]
@@ -999,7 +989,22 @@ class WindPark(om.Group):
                 n_refine = modeling_options['WISDEM']['TowerSE']["n_refine"]
                 n_full = get_nfull(n_height, nref=n_refine)
                 self.add_subsystem('towerse_post',   CylinderPostFrame(modeling_options=modeling_options["WISDEM"]["TowerSE"], n_dlc=1, n_full = n_full))
-            
+                if modeling_options["QBlade"].get("tower_fatigue", {}).get("flag", False):
+                    self.add_subsystem(
+                        "tower_fatigue_post",
+                        TowerFatiguePostComp(modeling_options=modeling_options),
+                    )
+                    for k in ["z_full", "outer_diameter_full", "t_full"]:
+                        self.connect(f"towerse.{k}", f"tower_fatigue_post.{k}")
+
+                    for k in ["tower_fatigue_Fz_ts", "tower_fatigue_Mx_ts", "tower_fatigue_My_ts",
+                             "tower_fatigue_n_time", "tower_fatigue_active", "tower_fatigue_probability", "tower_fatigue_duration",
+                              "tower_fatigue_case_id"]:
+                        self.connect(
+                            f"aeroelastic_qblade.{k}",
+                            f"tower_fatigue_post.{k}",
+                        )
+
             if modeling_options["flags"]["monopile"]:
                 n_height = modeling_options['WISDEM']['FixedBottomSE']["n_height"]
                 n_refine = modeling_options['WISDEM']['FixedBottomSE']["n_refine"]

@@ -305,8 +305,8 @@ class TowerFatiguePostComp(ExplicitComponent):
     OpenMDAO component for tower fatigue post-processing.
 
     This component does not run QBlade.
-    It receives QBlade tower load time series through a discrete input and
-    recomputes tower fatigue damage from the current tower geometry.
+    It receives frozen QBlade tower load time series as continuous OpenMDAO inputs
+    and recomputes tower fatigue damage from the current tower geometry.
     """
 
     def initialize(self):
@@ -346,49 +346,27 @@ class TowerFatiguePostComp(ExplicitComponent):
             desc="Full refined tower wall thickness by section from TowerSE.",
         )
 
-        self.add_discrete_input("tower_fatigue_ts", val={})
+        n_cases_fat = self.options["modeling_options"]["DLC_driver"]["n_cases"]
+        n_stations_fat = 11
+        n_time_fat = fatigue_options.get("n_time_max", 92500)
 
-        self.add_output(
-            "tower_fatigue_damage_25y",
-            val=np.zeros(self.n_sec_tower_fatigue),
-            desc="Maximum lifetime Miner damage over theta by tower section.",
-        )
-        self.add_output(
-            "tower_fatigue_constr",
-            val=np.zeros(self.n_sec_tower_fatigue),
-            desc="Tower fatigue utilization constraint by section.",
-        )
-        self.add_output(
-            "tower_fatigue_damage_25y_theta",
-            val=np.zeros((self.n_sec_tower_fatigue, self.n_theta_tower_fatigue)),
-            desc="Lifetime Miner damage by tower section and circumferential point.",
-        )
+        self.add_input( "tower_fatigue_Fz_ts", val=np.zeros((n_cases_fat, n_stations_fat, n_time_fat)), units="N")
+        self.add_input("tower_fatigue_Mx_ts", val=np.zeros((n_cases_fat, n_stations_fat, n_time_fat)), units="N*m")
+        self.add_input("tower_fatigue_My_ts", val=np.zeros((n_cases_fat, n_stations_fat, n_time_fat)), units="N*m")
+        self.add_input("tower_fatigue_n_time", val=np.zeros(n_cases_fat))
+        self.add_input("tower_fatigue_active", val=np.zeros(n_cases_fat))
+        self.add_input("tower_fatigue_probability", val=np.zeros(n_cases_fat))
+        self.add_input("tower_fatigue_duration", val=np.zeros(n_cases_fat), units="s")
+        self.add_input("tower_fatigue_case_id", val=-np.ones(n_cases_fat))
+        self.add_output("tower_fatigue_damage_25y", val=np.zeros(self.n_sec_tower_fatigue), desc="Maximum lifetime Miner damage over theta by tower section.")
+        self.add_output("tower_fatigue_constr", val=np.zeros(self.n_sec_tower_fatigue), desc="Tower fatigue utilization constraint by section.")
+        self.add_output("tower_fatigue_damage_25y_theta", val=np.zeros((self.n_sec_tower_fatigue, self.n_theta_tower_fatigue)), desc="Lifetime Miner damage by tower section and circumferential point.")
 
-        self.declare_partials("*", "*", method="fd")
-
-    def _tower_time_series_channel_names(self):
-        stations = [f"{station:.3f}" for station in np.linspace(0.1, 0.9, 9)]
-        return {
-            "Fx": ["X_tb For. TWR Bot. Constr."]
-            + [f"X_l For. TWR pos {station}" for station in stations]
-            + ["X_tt For. TWR Top Constr."],
-            "Fy": ["Y_tb For. TWR Bot. Constr."]
-            + [f"Y_l For. TWR pos {station}" for station in stations]
-            + ["Y_tt For. TWR Top Constr."],
-            "Fz": ["Z_tb For. TWR Bot. Constr."]
-            + [f"Z_l For. TWR pos {station}" for station in stations]
-            + ["Z_tt For. TWR Top Constr."],
-            "Mx": ["X_tb Mom. TWR Bot. Constr."]
-            + [f"X_l Mom. TWR pos {station}" for station in stations]
-            + ["X_tt Mom. TWR Top Constr."],
-            "My": ["Y_tb Mom. TWR Bot. Constr."]
-            + [f"Y_l Mom. TWR pos {station}" for station in stations]
-            + ["Y_tt Mom. TWR Top Constr."],
-            "Mz": ["Z_tb Mom. TWR Bot. Constr."]
-            + [f"Z_l Mom. TWR pos {station}" for station in stations]
-            + ["Z_tt Mom. TWR Top Constr."],
-        }
-
+        self.declare_partials(
+            of=["tower_fatigue_damage_25y", "tower_fatigue_constr", "tower_fatigue_damage_25y_theta"],
+            wrt=["z_full", "outer_diameter_full", "t_full"],
+            method="fd")
+        
     def _tower_fatigue_helper_options(self):
         fatigue_options = self.options["modeling_options"]["QBlade"].get(
             "tower_fatigue", {}
@@ -433,22 +411,18 @@ class TowerFatiguePostComp(ExplicitComponent):
             outputs["tower_fatigue_damage_25y_theta"]
         )
 
-        payload = discrete_inputs["tower_fatigue_ts"]
+        active = np.asarray(inputs["tower_fatigue_active"], dtype=float)
+        probabilities = np.asarray(inputs["tower_fatigue_probability"], dtype=float)
+        durations = np.asarray(inputs["tower_fatigue_duration"], dtype=float)
+        n_time_vec = np.asarray(inputs["tower_fatigue_n_time"], dtype=float)
 
-        if not payload:
-            return
-
-        chan_time = payload.get("chan_time", [])
-        active_ids = payload.get("active_ids", [])
-        probabilities = payload.get("probabilities", [])
-        case_durations = payload.get("case_durations", {})
-
-        if not chan_time or len(active_ids) == 0:
+        if not np.any(active > 0.5):
             return
 
         fatigue_options = self._tower_fatigue_helper_options()
+        active_mask = active > 0.5
         fatigue_probabilities = prepare_tower_fatigue_probabilities(
-            probabilities,
+            probabilities[active_mask],
             fatigue_options,
         )
 
@@ -458,35 +432,41 @@ class TowerFatiguePostComp(ExplicitComponent):
 
         z_sec, _ = util.nodal2sectional(z_full)
         section_D, _ = util.nodal2sectional(outer_diameter_full)
-        section_t = t_full
+        section_t = np.asarray(t_full, dtype=float)
+
+        if section_D.shape != section_t.shape:
+            raise ValueError(
+                "Tower fatigue geometry mismatch: section_D and section_t "
+                f"must have the same shape, got {section_D.shape} and {section_t.shape}."
+            )
 
         z_target = (z_sec - z_sec[0]) / (z_sec[-1] - z_sec[0])
-
         tower_grid = np.linspace(0.0, 1.0, 11)
-        channel_names = self._tower_time_series_channel_names()
-
         damage_theta = np.zeros_like(outputs["tower_fatigue_damage_25y_theta"])
+        active_indices = np.where(active_mask)[0]
 
-        for i_out, case_id in enumerate(active_ids):
-            if i_out >= len(chan_time):
+        for i_local, i_case in enumerate(active_indices):
+            n_time = int(round(n_time_vec[i_case]))
+
+            if n_time < 3:
                 continue
 
-            if fatigue_probabilities[i_out] <= 0.0:
-                continue
+            if durations[i_case] <= 0.0:
+                raise ValueError(
+                    f"tower_fatigue_duration must be positive for active case slot {i_case}."
+                )
 
-            timeseries = chan_time[i_out]
+            Fz_station = inputs["tower_fatigue_Fz_ts"][i_case, :, :n_time]
+            Mx_station = inputs["tower_fatigue_Mx_ts"][i_case, :, :n_time]
+            My_station = inputs["tower_fatigue_My_ts"][i_case, :, :n_time]
 
             case_section_loads = {}
 
-            for load_key in ("Fz", "Mx", "My"):
-                station_values = np.vstack(
-                    [timeseries[channel] for channel in channel_names[load_key]]
-                )
-
-                # QBladeWrapper scales force and moment channels from N/Nm to kN/kNm
-                # for pCrunch. Convert back to SI units expected by the fatigue helper.
-                station_values *= 1.0e3
-
+            for load_key, station_values in [
+                ("Fz", Fz_station),
+                ("Mx", Mx_station),
+                ("My", My_station),
+            ]:
                 interpolator = PchipInterpolator(
                     tower_grid,
                     station_values,
@@ -501,8 +481,8 @@ class TowerFatiguePostComp(ExplicitComponent):
                 case_section_loads["My"],
                 section_D,
                 section_t,
-                fatigue_probabilities[i_out],
-                case_durations[int(case_id)],
+                fatigue_probabilities[i_local],
+                durations[i_case],
                 fatigue_options,
             )
 

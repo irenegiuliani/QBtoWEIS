@@ -53,11 +53,6 @@ import yaml
 from openfast_io.FAST_reader import InputReader_OpenFAST
 
 from weis.aeroelasticse.QBlade_writer         import InputWriter_QBlade
-from weis.aeroelasticse.tower_fatigue_post import (
-    add_tower_fatigue_case_damage,
-    finalize_tower_fatigue_outputs,
-    prepare_tower_fatigue_probabilities,
-)
 import weis.aeroelasticse.QBlade_wrapper as qbwrap
 import random
 import base64
@@ -354,10 +349,14 @@ class QBLADELoadCases(ExplicitComponent):
         self.QBLADE_namingOut = self.QBLADE_InputFile
         tower_fatigue_options = modopt['QBlade'].get('tower_fatigue', {})
         self.tower_fatigue_post = (
-            tower_fatigue_options.get('flag', QBmgmt.get('tower_fatigue_post', False))
+            tower_fatigue_options.get('flag', False)
             and modopt["flags"]["tower"]
             and not modopt['QBlade']['from_qblade']
         )
+        if self.tower_fatigue_post:
+            self.n_tower_fatigue_cases = modopt["DLC_driver"]["n_cases"]
+            self.n_tower_fatigue_stations = 11
+            self.n_tower_fatigue_time = tower_fatigue_options.get("n_time_max", 92500)        
         
         if modopt['QBlade']['simulation']['DLCGenerator'] or modopt['QBlade']['simulation']['WNDTYPE']== 1:
             self.wind_directory = os.path.join(self.QBLADE_runDirectory, 'wind')
@@ -433,6 +432,70 @@ class QBLADELoadCases(ExplicitComponent):
             self.add_output('tower_maxMy_My',       val=np.zeros(n_full_tow-1), units='kN*m',   desc='distributed moment around tower-aligned x-axis corresponding to maximum fore-aft moment at tower base')
             self.add_output('tower_maxMy_Mz',       val=np.zeros(n_full_tow-1), units='kN*m',   desc='distributed moment around tower-aligned x-axis corresponding to maximum fore-aft moment at tower base')
 
+            if self.tower_fatigue_post:
+                n_cases_fat = self.n_tower_fatigue_cases
+                n_stations_fat = self.n_tower_fatigue_stations
+                n_time_fat = self.n_tower_fatigue_time
+
+                self.add_output(
+                    "tower_fatigue_Fz_ts",
+                    val=np.zeros((n_cases_fat, n_stations_fat, n_time_fat)),
+                    units="N",
+                    desc="Tower axial force time series for fatigue at QBlade tower stations.",
+                )
+
+                self.add_output(
+                    "tower_fatigue_Mx_ts",
+                    val=np.zeros((n_cases_fat, n_stations_fat, n_time_fat)),
+                    units="N*m",
+                    desc="Tower x-bending moment time series for fatigue at QBlade tower stations.",
+                )
+
+                self.add_output(
+                    "tower_fatigue_My_ts",
+                    val=np.zeros((n_cases_fat, n_stations_fat, n_time_fat)),
+                    units="N*m",
+                    desc="Tower y-bending moment time series for fatigue at QBlade tower stations.",
+                )
+
+                self.add_output(
+                    "tower_fatigue_time",
+                    val=np.zeros((n_cases_fat, n_time_fat)),
+                    units="s",
+                    desc="Time vector associated with each tower fatigue time series.",
+                )
+
+                self.add_output(
+                    "tower_fatigue_n_time",
+                    val=np.zeros(n_cases_fat),
+                    desc="Number of valid time samples for each tower fatigue case.",
+                )
+
+                self.add_output(
+                    "tower_fatigue_active",
+                    val=np.zeros(n_cases_fat),
+                    desc="1 if the case is active for tower fatigue, 0 otherwise.",
+                )
+
+                self.add_output(
+                    "tower_fatigue_probability",
+                    val=np.zeros(n_cases_fat),
+                    desc="Probability weight of each tower fatigue case.",
+                )
+
+                self.add_output(
+                    "tower_fatigue_duration",
+                    val=np.zeros(n_cases_fat),
+                    units="s",
+                    desc="Analyzed duration of each tower fatigue case.",
+                )
+
+                self.add_output(
+                    "tower_fatigue_case_id",
+                    val=-np.ones(n_cases_fat),
+                    desc="Original QBlade/DLC case id for each tower fatigue slot.",
+                )
+
              # Monopile outputs
             if modopt['flags']['monopile']:
                 self.add_output('max_M1N1MKye',      val=0.0,                   units='kN*m',   desc='maximum of My moment of member 1 at node 1 (base of the monopile)')
@@ -466,15 +529,10 @@ class QBLADELoadCases(ExplicitComponent):
         self.add_output('damage_tower_base',        val=0.0, desc="Miner's rule cumulative damage at tower base")
         self.add_output('damage_monopile_base',     val=0.0, desc="Miner's rule cumulative damage at monopile base")
 
-        if self.tower_fatigue_post:
-            self.n_sec_tower_fatigue = n_full_tow - 1
-            self.n_theta_tower_fatigue = tower_fatigue_options.get('n_theta', 36)
-
         # Simulation output
         self.add_output('qblade_failed',             val=0.0, desc="Numerical value for whether any qblade runs failed. 0 if false, 2 if true")
 
         self.add_discrete_output('ts_out_dir', val={})
-        self.add_discrete_output("tower_fatigue_ts", val={})
 
     def compute(self, inputs, outputs, discrete_inputs, discrete_outputs):
         print("############################################################")
@@ -566,87 +624,6 @@ class QBLADELoadCases(ExplicitComponent):
 
         return [values[0], values[1]]
 
-    def _get_tower_fatigue_output_dimensions(self, modopt, QBmgmt):
-        """
-        Return fixed OpenMDAO output sizes for tower fatigue time histories.
-
-        QBlade produces one dictionary per successful case at run time, but
-        OpenMDAO output shapes must be known during setup. These dimensions are
-        padded maxima. Failed and unused slots are later left with zero loads,
-        zero probability, and zero valid-sample count.
-        """
-        dt = modopt['QBlade']['simulation']['TIMESTEP']
-        max_cases = int(QBmgmt.get('tower_fatigue_max_cases', 0))
-
-        if modopt['QBlade']['simulation']['DLCGenerator']:
-            if max_cases <= 0:
-                max_cases = self._estimate_dlc_case_count_for_setup(modopt)
-            max_analysis_time = 0.0
-            for dlc_opt in modopt['DLC_driver']['DLCs']:
-                analysis_time = dlc_opt['analysis_time'] if dlc_opt['analysis_time'] > 0 else 600.0
-                max_analysis_time = max(max_analysis_time, analysis_time)
-            duration = max_analysis_time
-        else:
-            simopt = modopt['QBlade']['simulation']
-            if simopt['WNDTYPE'] == 1 and 'QTurbSim' in modopt['QBlade'] and len(modopt['QBlade']['QTurbSim'].get('URef', [])) > 0:
-                inferred_cases = len(modopt['QBlade']['QTurbSim']['URef'])
-            else:
-                meaninf = simopt['MEANINF']
-                inferred_cases = len(meaninf) if isinstance(meaninf, (list, tuple, np.ndarray)) else 1
-            max_cases = max_cases if max_cases > 0 else max(1, inferred_cases)
-
-            if simopt['TMax'] > 0:
-                duration = max(simopt['TMax'] - simopt['STOREFROM'], dt)
-            else:
-                duration = max(simopt['NUMTIMESTEPS'] * dt - simopt['STOREFROM'], dt)
-
-        # Include the endpoint and a one-sample cushion for QBlade rounding.
-        n_time = int(np.ceil(duration / dt)) + 2
-        return max_cases, n_time
-
-    def _estimate_dlc_case_count_for_setup(self, modopt):
-        """
-        Estimate the QBlade DLC case count during OpenMDAO setup.
-
-        This mirrors the DLC generator without writing wind files or QBlade
-        input files. If a workflow has highly dynamic user groups and this
-        estimate is not large enough, set
-        General.qblade_configuration.tower_fatigue_max_cases explicitly.
-        """
-        try:
-            dlc_generator = DLCGenerator(
-                ws_cut_in=4.0,
-                ws_cut_out=25.0,
-                ws_rated=10.0,
-                wind_speed_class='I',
-                wind_turbulence_class='A',
-                fix_wind_seeds=modopt['DLC_driver']['fix_wind_seeds'],
-                fix_wave_seeds=modopt['DLC_driver']['fix_wave_seeds'],
-                metocean=modopt['DLC_driver']['metocean_conditions'],
-                dlc_driver_options=modopt['DLC_driver'],
-                initial_condition_table={},
-            )
-            for dlc_opt in modopt['DLC_driver']['DLCs']:
-                dlc_generator.generate(dlc_opt['DLC'], copy.deepcopy(dlc_opt))
-            return max(1, dlc_generator.n_cases)
-        except Exception as exc:
-            raise ValueError(
-                'Unable to infer the number of QBlade DLC cases for tower fatigue outputs. '
-                'Set General.qblade_configuration.tower_fatigue_max_cases to a safe upper bound.'
-            ) from exc
-
-    def _tower_time_series_channel_names(self):
-        """Channel names for the 11-point QBlade tower grid used by existing post-processing."""
-        stations = [f'{station:.3f}' for station in np.linspace(0.1, 0.9, 9)]
-        return {
-            'Fx': ['X_tb For. TWR Bot. Constr.'] + [f'X_l For. TWR pos {station}' for station in stations] + ['X_tt For. TWR Top Constr.'],
-            'Fy': ['Y_tb For. TWR Bot. Constr.'] + [f'Y_l For. TWR pos {station}' for station in stations] + ['Y_tt For. TWR Top Constr.'],
-            'Fz': ['Z_tb For. TWR Bot. Constr.'] + [f'Z_l For. TWR pos {station}' for station in stations] + ['Z_tt For. TWR Top Constr.'],
-            'Mx': ['X_tb Mom. TWR Bot. Constr.'] + [f'X_l Mom. TWR pos {station}' for station in stations] + ['X_tt Mom. TWR Top Constr.'],
-            'My': ['Y_tb Mom. TWR Bot. Constr.'] + [f'Y_l Mom. TWR pos {station}' for station in stations] + ['Y_tt Mom. TWR Top Constr.'],
-            'Mz': ['Z_tb Mom. TWR Bot. Constr.'] + [f'Z_l Mom. TWR pos {station}' for station in stations] + ['Z_tt Mom. TWR Top Constr.'],
-        }
-
     def _get_tower_fatigue_active_cases_and_probabilities(self, dlc_generator, failed_sim_ids, discrete_inputs):
         """
         Return original case ids and probability weights for populated fatigue arrays.
@@ -705,50 +682,34 @@ class QBLADELoadCases(ExplicitComponent):
             return max(float(timeseries['Time'][-1] - timeseries['Time'][0]), self.qb_vt['QSim']['TIMESTEP'])
         return max(float(self.qb_vt['QSim']['TMax'] - self.qb_vt['QSim']['STOREFROM']), self.qb_vt['QSim']['TIMESTEP'])
 
-    def _tower_fatigue_helper_options(self):
-        """Return fatigue options matching the existing tower_fatigue_post component defaults."""
-        fatigue_options = self.options['modeling_options']['QBlade'].get('tower_fatigue', {})
-        return {
-            'n_theta': fatigue_options.get('n_theta', 36),
-            'lifetime_years': fatigue_options.get('lifetime_years', 25.0),
-            'fatigue_design_factor': fatigue_options.get('fatigue_design_factor', 1.0),
-            'sn_model': fatigue_options.get('sn_model', 'single_slope'),
-            'sn_slope': fatigue_options.get('sn_slope', 3.0),
-            'sn_intercept': fatigue_options.get('sn_intercept', 10.0**12.164),
-            'dnv_m1': fatigue_options.get('dnv_m1', 3.0),
-            'dnv_loga1': fatigue_options.get('dnv_loga1', 12.010),
-            'dnv_m2': fatigue_options.get('dnv_m2', 5.0),
-            'dnv_loga2': fatigue_options.get('dnv_loga2', 15.350),
-            'dnv_n_switch': fatigue_options.get('dnv_n_switch', 1.0e7),
-            'stress_unit': fatigue_options.get('stress_unit', 'MPa'),
-            'apply_thickness_correction': fatigue_options.get('apply_thickness_correction', True),
-            't_ref': fatigue_options.get('t_ref', 0.025),
-            'k_thickness': fatigue_options.get('k_thickness', 0.20),
-            'rainflow_bins': fatigue_options.get('rainflow_bins', 128),
-            'normalize_probabilities': fatigue_options.get('normalize_probabilities', False),
-            'check_probability_sum': fatigue_options.get('check_probability_sum', False),
-        }
-
-    def _build_tower_fatigue_ts_payload(
+    def _fill_tower_fatigue_outputs(
         self,
+        outputs,
         chan_time,
         dlc_generator,
         discrete_inputs,
         failed_sim_ids=None,
     ):
-        """
-        Build the discrete payload passed to the external tower fatigue component.
-
-        This payload contains QBlade time histories and case metadata only.
-        It does not contain stress, damage, or fatigue constraints.
-        """
         if failed_sim_ids is None:
             failed_sim_ids = []
         else:
             failed_sim_ids = list(failed_sim_ids)
 
+        # Reset all fatigue time-series outputs
+        outputs["tower_fatigue_Fz_ts"][:] = 0.0
+        outputs["tower_fatigue_Mx_ts"][:] = 0.0
+        outputs["tower_fatigue_My_ts"][:] = 0.0
+        outputs["tower_fatigue_time"][:] = 0.0
+        outputs["tower_fatigue_n_time"][:] = 0.0
+        outputs["tower_fatigue_active"][:] = 0.0
+        outputs["tower_fatigue_probability"][:] = 0.0
+        outputs["tower_fatigue_duration"][:] = 0.0
+        outputs["tower_fatigue_case_id"][:] = -1.0
+
         if not chan_time:
-            return {}
+            raise RuntimeError(
+                "Tower fatigue is active, but chan_time is empty. "
+                "QBlade did not provide time series for tower fatigue.")
 
         if dlc_generator is not None:
             n_cases = dlc_generator.n_cases
@@ -758,6 +719,14 @@ class QBLADELoadCases(ExplicitComponent):
             n_cases = len(self.qb_vt["QSim"]["MEANINF"])
 
         successful_cases = np.delete(np.arange(n_cases), failed_sim_ids)
+
+        if len(chan_time) != len(successful_cases):
+            raise RuntimeError(
+                "Mismatch between QBlade successful cases and available chan_time entries: "
+                f"len(chan_time)={len(chan_time)}, "
+                f"len(successful_cases)={len(successful_cases)}."
+            )
+
         case_to_timeseries = {
             int(case_id): chan_time[i_ts]
             for i_ts, case_id in enumerate(successful_cases)
@@ -770,39 +739,99 @@ class QBLADELoadCases(ExplicitComponent):
         )
 
         if len(active_ids) == 0:
-            return {}
+            return outputs
 
-        active_chan_time = []
-        active_case_ids = []
-        active_probabilities = []
-        case_durations = {}
+        fatigue_twr_stations = [f"{station:.3f}" for station in np.linspace(0.1, 0.9, 9)]
+        channel_names = {
+            "Fz": ["Z_tb For. TWR Bot. Constr."] + [f"Z_l For. TWR pos {station}" for station in fatigue_twr_stations] + ["Z_tt For. TWR Top Constr."],
+            "Mx": ["X_tb Mom. TWR Bot. Constr."] + [f"X_l Mom. TWR pos {station}" for station in fatigue_twr_stations] + ["X_tt Mom. TWR Top Constr."],
+            "My": ["Y_tb Mom. TWR Bot. Constr."] + [f"Y_l Mom. TWR pos {station}" for station in fatigue_twr_stations] + ["Y_tt Mom. TWR Top Constr."]}
 
-        for i_out, case_id in enumerate(active_ids):
+        n_time_max = outputs["tower_fatigue_time"].shape[1]
+        n_slots = outputs["tower_fatigue_active"].shape[0]
+
+        i_slot = 0
+
+        for i_prob, case_id in enumerate(active_ids):
             case_id = int(case_id)
 
             if case_id not in case_to_timeseries:
                 continue
 
+            if i_slot >= n_slots:
+                raise ValueError(
+                    "Number of active tower fatigue cases exceeds the allocated "
+                    "tower_fatigue output size. Increase the number of DLC cases "
+                    "or check QBlade.tower_fatigue settings."
+                )
+
             timeseries = case_to_timeseries[case_id]
 
-            active_chan_time.append(timeseries)
-            active_case_ids.append(case_id)
-            active_probabilities.append(float(probabilities[i_out]))
-            case_durations[case_id] = self._get_tower_fatigue_case_duration(
+            if "Time" not in timeseries:
+                raise KeyError(f"Missing 'Time' channel for tower fatigue case {case_id}.")
+
+            time = np.asarray(timeseries["Time"], dtype=float)
+            n_time = len(time)
+
+            if n_time < 3:
+                logger.warning(
+                    f"WARNING: Tower fatigue case {case_id} has only {n_time} samples. "
+                    "The case will be skipped and marked inactive."
+                )
+                continue
+
+            if n_time > n_time_max:
+                raise ValueError(
+                    f"Tower fatigue case {case_id} has {n_time} time samples, "
+                    f"but QBlade.tower_fatigue.n_time_max is {n_time_max}. "
+                    "Increase n_time_max or reduce the saved time window."
+                )
+
+            duration = self._get_tower_fatigue_case_duration(
                 case_id,
                 timeseries,
                 dlc_generator,
             )
 
-        if len(active_case_ids) == 0:
-            return {}
+            outputs["tower_fatigue_time"][i_slot, :n_time] = time
+            outputs["tower_fatigue_n_time"][i_slot] = n_time
+            outputs["tower_fatigue_active"][i_slot] = 1.0
+            outputs["tower_fatigue_probability"][i_slot] = float(probabilities[i_prob])
+            outputs["tower_fatigue_duration"][i_slot] = duration
+            outputs["tower_fatigue_case_id"][i_slot] = float(case_id)
 
-        return {
-            "chan_time": active_chan_time,
-            "active_ids": active_case_ids,
-            "probabilities": np.asarray(active_probabilities, dtype=float),
-            "case_durations": case_durations,
-        }
+            for load_key, output_name in [
+                ("Fz", "tower_fatigue_Fz_ts"),
+                ("Mx", "tower_fatigue_Mx_ts"),
+                ("My", "tower_fatigue_My_ts"),
+            ]:
+                missing = [
+                    channel
+                    for channel in channel_names[load_key]
+                    if channel not in timeseries
+                ]
+                if missing:
+                    raise KeyError(
+                        f"Missing QBlade tower fatigue channels for case {case_id}, "
+                        f"load {load_key}: {missing}"
+                    )
+
+                station_values = np.vstack(
+                    [
+                        np.asarray(timeseries[channel], dtype=float)
+                        for channel in channel_names[load_key]
+                    ]
+                )
+
+                # QBladeWrapper/pCrunch time-series channels are currently in kN and kN*m.
+                # Store these OpenMDAO fatigue outputs directly in SI units.
+                station_values *= 1.0e3
+
+                outputs[output_name][i_slot, :, :n_time] = station_values
+
+            i_slot += 1
+
+        return outputs
 
     def _normalize_qblade_ocean_hydro_coefficients(self, qb_vt, modopt):
         qbo = qb_vt.get('QBladeOcean', {})
@@ -2554,12 +2583,7 @@ class QBLADELoadCases(ExplicitComponent):
                 outputs = self.get_tower_loading(summary_stats, extreme_table, inputs, outputs)
 
                 if self.tower_fatigue_post:
-                    discrete_outputs["tower_fatigue_ts"] = self._build_tower_fatigue_ts_payload(
-                        chan_time,
-                        dlc_generator,
-                        discrete_inputs,
-                        failed_sim_ids,
-                    )
+                    outputs = self._fill_tower_fatigue_outputs(outputs, chan_time, dlc_generator, discrete_inputs, failed_sim_ids)                    
 
             if modopt['flags']['monopile']:
                 try:
