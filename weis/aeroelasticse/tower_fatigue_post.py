@@ -184,11 +184,11 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
             desc="S-N curve model to be used for fatigue damage evaluation.",
         )
         self.options.declare(
-            "rainflow_load_classes",
+            "rainflow_ranges_bins",
             default=256,
             types=int,
             desc=(
-                "Number of load classes used by fatpack.find_rainflow_ranges. "
+                "Number of load-range bins used by fatpack.find_range_count. "
                 "Default 256 to match the pCrunch/NREL rainflow-counting interface."
             ),
         )
@@ -985,11 +985,12 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
     def _rainflow_ranges_counts(self, stress):
         """
         Count rainflow stress ranges using fatpack, following the same
-        high-level rainflow interface used by NREL pCrunch.
+        high-level rainflow binning interface used by NREL pCrunch.
 
         pCrunch calls ``fatpack.find_rainflow_ranges`` directly on the channel
-        time series. Here the same approach is used on the reconstructed stress
-        time series. The returned ranges are passed to the existing S-N / Miner
+        time series, then bins those ranges with ``fatpack.find_range_count``.
+        Here the same approach is used on the reconstructed stress time series.
+        The binned ranges and counts are passed to the existing S-N / Miner
         damage calculation without changing the downstream fatigue physics.
 
         Returns
@@ -1011,31 +1012,42 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         if np.any(~np.isfinite(stress)):
             raise ValueError("Rainflow input stress contains non-finite values.")
 
-        rainflow_load_classes = self.options["rainflow_load_classes"]
+        rainflow_ranges_bins = self.options["rainflow_ranges_bins"]
 
-        if rainflow_load_classes <= 0:
-            raise ValueError("rainflow_load_classes must be positive.")
+        if rainflow_ranges_bins <= 0:
+            raise ValueError("rainflow_ranges_bins must be positive.")
 
         try:
-            ranges = fatpack.find_rainflow_ranges(
-                stress,
-                k=rainflow_load_classes,
-            )
+            ranges = fatpack.find_rainflow_ranges(stress)
         except ValueError:
             return np.zeros(0), np.zeros(0)
 
-        ranges = np.asarray(ranges, dtype=float).squeeze()
+        ranges = np.atleast_1d(np.asarray(ranges, dtype=float).squeeze())
 
         if ranges.size == 0:
             return np.zeros(0), np.zeros(0)
 
-        valid = ranges > 0.0
+        valid = np.isfinite(ranges) & (ranges > 0.0)
         ranges = ranges[valid]
 
         if ranges.size == 0:
             return np.zeros(0), np.zeros(0)
 
-        counts = np.ones_like(ranges, dtype=float)
+        counts, ranges = fatpack.find_range_count(ranges, rainflow_ranges_bins)
+        counts = np.atleast_1d(np.asarray(counts, dtype=float).squeeze())
+        ranges = np.atleast_1d(np.asarray(ranges, dtype=float).squeeze())
+
+        valid = (
+            np.isfinite(ranges)
+            & np.isfinite(counts)
+            & (ranges > 0.0)
+            & (counts > 0.0)
+        )
+        ranges = ranges[valid]
+        counts = counts[valid]
+
+        if ranges.size == 0:
+            return np.zeros(0), np.zeros(0)
 
         return ranges, counts
 
@@ -1464,54 +1476,6 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         outputs["fatigue_damage"] = fatigue_damage
         outputs["constr_fatigue"] = fatigue_damage * inputs["fatigue_design_factor"]
 
-
-def _smoke_test_scale_to_si():
-    """
-    Minimal unit-level check for the scale_to_si load conversion path.
-
-    Verifies that raw values stored in solver-specific units (e.g. kN, kNm
-    from QBlade) are correctly converted to SI (N, N*m) by the scale_to_si
-    factors before entering stress reconstruction.
-
-    This function requires no QBlade installation, no .p files, and no full
-    OpenMDAO setup.  It can be called from any test suite or run directly.
-
-    Expected unit path:
-        raw kN  * 1e3 = N    (axial force)
-        raw kNm * 1e3 = N*m  (bending moment)
-    """
-    # Synthetic raw values as they appear in a QBlade .p file (kN and kNm).
-    raw_Fz = np.array([1.0, -2.0, 0.5])   # kN
-    raw_Mx = np.array([2.5, -1.5, 3.0])   # kNm
-    raw_My = np.array([-1.0, 4.0, -0.5])  # kNm
-
-    scale_to_si = {"Fz": 1.0e3, "Mx": 1.0e3, "My": 1.0e3}
-
-    Fz_si = raw_Fz * scale_to_si["Fz"]
-    Mx_si = raw_Mx * scale_to_si["Mx"]
-    My_si = raw_My * scale_to_si["My"]
-
-    expected_Fz = np.array([1000.0, -2000.0, 500.0])   # N
-    expected_Mx = np.array([2500.0, -1500.0, 3000.0])  # N*m
-    expected_My = np.array([-1000.0, 4000.0, -500.0])  # N*m
-
-    assert np.allclose(Fz_si, expected_Fz), (
-        f"scale_to_si Fz: expected {expected_Fz}, got {Fz_si}"
-    )
-    assert np.allclose(Mx_si, expected_Mx), (
-        f"scale_to_si Mx: expected {expected_Mx}, got {Mx_si}"
-    )
-    assert np.allclose(My_si, expected_My), (
-        f"scale_to_si My: expected {expected_My}, got {My_si}"
-    )
-
-    # A future OpenFAST builder that stores loads already in SI uses scale=1.0.
-    scale_openfast = {"Fz": 1.0, "Mx": 1.0, "My": 1.0}
-    assert np.allclose(raw_Fz * scale_openfast["Fz"], raw_Fz), (
-        "scale_to_si = 1.0 must leave values unchanged"
-    )
-
-
 if __name__ == "__main__":
-    _smoke_test_scale_to_si()
-    print("TowerFatigue scale_to_si smoke test passed.")
+    pass
+
