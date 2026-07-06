@@ -10,10 +10,10 @@ from time import time
 from openmdao.utils.assert_utils import assert_near_equal
 
 
-def execute_script(fscript):
+def execute_script(fscript, examples_root="examples"):
     thisdir = os.path.dirname(os.path.realpath(__file__))
     root_dir = os.path.dirname(os.path.dirname(thisdir))
-    examples_dir = os.path.join(root_dir, "examples")
+    examples_dir = os.path.join(root_dir, examples_root)
 
     # Go to location due to relative path use for airfoil files
     print("\n\n")
@@ -34,6 +34,8 @@ def execute_script(fscript):
     s = time()
     spec.loader.exec_module(mod)
     print(time() - s, "seconds to run")
+
+    return mod
 
 
 

@@ -110,8 +110,8 @@ properties:
                         description: Flag to only generate a QBlade model and stop
                     path2qb_dll:
                         type: string
-                        default: C:\Users\FP\Documents\QBladeCE_2.0.9.5\QBladeCE_2.0.9.5.dll
-                        description: Path to QBlade shared library (e.g. /home/user/QBlade/libqblade.so)
+                        default: none
+                        description: Path to QBlade shared library (e.g. /home/user/QBlade/libqblade.so). Overridden at runtime by the QBLADE_DLL_PATH environment variable if it is set, so the same modeling-options yaml can be shared across machines without hardcoding a per-user install path.
                     cl_devices:
                         type: array
                         default: [1]

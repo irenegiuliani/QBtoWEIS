@@ -1693,8 +1693,22 @@ class QBLADELoadCases(ExplicitComponent):
 
     def run_QBLADE(self, inputs, discrete_inputs, qb_vt):
         modopt          = self.options['modeling_options']
-        path2qb_dll     = modopt['General']['qblade_configuration']['path2qb_dll']
-        self.qb_vt = qb_vt 
+        # QBLADE_DLL_PATH, if set, overrides modeling_options so the same yaml
+        # can be shared across machines without each contributor hardcoding
+        # their own local QBlade install path.
+        path2qb_dll     = os.environ.get(
+            'QBLADE_DLL_PATH',
+            modopt['General']['qblade_configuration']['path2qb_dll'],
+        )
+        if not path2qb_dll or path2qb_dll.lower() == 'none':
+            raise ValueError(
+                "QBlade is active (QBlade.flag=True) but no QBlade shared library "
+                "path is configured. Set modeling_options['General']"
+                "['qblade_configuration']['path2qb_dll'] in your modeling-options "
+                "yaml, or set the QBLADE_DLL_PATH environment variable to your "
+                "local QBlade .dll/.so path."
+            )
+        self.qb_vt = qb_vt
         
         dlc_generator = None # Do this to avoid error when no DLCs are generated
 

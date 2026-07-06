@@ -1165,77 +1165,122 @@ properties:
                         default: False 
                         description: weather to override the strip theory coefficients defined in the windIO file and replace them with a global value for each member
                     HydroCdN:
-                        type: object
                         default: {}
-                        description: "Per-member normal drag coefficient, {member_name: [x_val, y_val]}; used when override_morison_coefficients is True"
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member normal drag coefficient, {member_name: [x_val, y_val]}; used when override_morison_coefficients is True. A legacy scalar or [x_val, y_val] list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     HydroCaN:
-                        type: object
                         default: {}
-                        description: "Per-member normal added-mass coefficient, {member_name: [x_val, y_val]}; used when override_morison_coefficients is True"
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member normal added-mass coefficient, {member_name: [x_val, y_val]}; used when override_morison_coefficients is True. A legacy scalar or [x_val, y_val] list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     HydroCpN:
-                        type: object
                         default: {}
-                        description: "Per-member normal pressure coefficient, {member_name: [x_val, y_val]}; used when override_morison_coefficients is True"
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member normal pressure coefficient, {member_name: [x_val, y_val]}; used when override_morison_coefficients is True. A legacy scalar or [x_val, y_val] list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     HydroCdNy:
-                        type: object
                         default: {}
-                        description: "Per-member y-direction normal drag coefficient (rectangular members only), {member_name: [start_val, end_val]}; used when override_morison_coefficients is True"
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member y-direction normal drag coefficient (rectangular members only), {member_name: [start_val, end_val]}; used when override_morison_coefficients is True. A legacy scalar or [start_val, end_val] list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     HydroCaNy:
-                        type: object
                         default: {}
-                        description: "Per-member y-direction normal added-mass coefficient (rectangular members only), {member_name: [start_val, end_val]}; used when override_morison_coefficients is True"
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member y-direction normal added-mass coefficient (rectangular members only), {member_name: [start_val, end_val]}; used when override_morison_coefficients is True. A legacy scalar or [start_val, end_val] list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     HydroCpNy:
-                        type: object
                         default: {}
-                        description: "Per-member y-direction normal pressure coefficient (rectangular members only), {member_name: [start_val, end_val]}; used when override_morison_coefficients is True"
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member y-direction normal pressure coefficient (rectangular members only), {member_name: [start_val, end_val]}; used when override_morison_coefficients is True. A legacy scalar or [start_val, end_val] list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     HydroCdA:
-                        type: object
                         default: {}
-                        description: "Per-member axial drag coefficient for HYDROJOINTCOEFF, {member_name: [start_joint_val, end_joint_val]}; consumed when override_morison_coefficients is True. When False, CdEnd from geometry (wt_init) is used instead."
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member axial drag coefficient for HYDROJOINTCOEFF, {member_name: [start_joint_val, end_joint_val]}; consumed when override_morison_coefficients is True. When False, CdEnd from geometry (wt_init) is used instead. A legacy scalar or list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     HydroCaA:
-                        type: object
                         default: {}
-                        description: "Per-member axial added-mass coefficient for HYDROJOINTCOEFF, {member_name: [start_joint_val, end_joint_val]}; consumed when override_morison_coefficients is True. When False, CaEnd from geometry (wt_init) is used instead. Forced to 0.0 when POTFLOW=True to avoid double-counting with radiation terms."
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member axial added-mass coefficient for HYDROJOINTCOEFF, {member_name: [start_joint_val, end_joint_val]}; consumed when override_morison_coefficients is True. When False, CaEnd from geometry (wt_init) is used instead. Forced to 0.0 when POTFLOW=True to avoid double-counting with radiation terms. A legacy scalar or list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     HydroCpA:
-                        type: object
                         default: {}
-                        description: "Per-member axial pressure coefficient for HYDROJOINTCOEFF, {member_name: [start_joint_val, end_joint_val]}; consumed when override_morison_coefficients is True. Defaults to 0.0 when False or when member name is absent."
-                        additionalProperties:
-                            type: array
-                            items:
-                                type: number
+                        description: "Per-member axial pressure coefficient for HYDROJOINTCOEFF, {member_name: [start_joint_val, end_joint_val]}; consumed when override_morison_coefficients is True. Defaults to 0.0 when False or when member name is absent. A legacy scalar or list is also accepted and auto-broadcast to every member (deprecated, see _normalize_qblade_ocean_hydro_coefficients in openmdao_qblade.py)."
+                        oneOf:
+                            - type: object
+                              additionalProperties:
+                                  type: array
+                                  items:
+                                      type: number
+                            - type: number
+                            - type: array
+                              items:
+                                  type: number
                     MCFC:
                         type: integer
                         default: 0
