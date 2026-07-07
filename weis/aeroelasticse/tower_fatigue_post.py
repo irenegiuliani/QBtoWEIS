@@ -288,11 +288,11 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         # initial choice.
         self.declare_partials("*", "*", method="fd")
 
-    def _load_time_series_data(self, ts_dir, case_file):
+    def _load_time_series_data(self, ts_dir, case_file, columns=None):
         """
         Load one saved time-series file.
 
-        Supported file formats are .p, .pkl, .pickle, .csv, and .npz.
+        Supported file formats are .p, .pkl, .pickle, .parquet, .csv, and .npz.
         """
         case_path = Path(case_file)
 
@@ -307,6 +307,9 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         if suffix in (".p", ".pkl", ".pickle"):
             data = pd.read_pickle(case_path)
 
+        elif suffix == ".parquet":
+            data = pd.read_parquet(case_path, columns=columns)
+
         elif suffix == ".csv":
             data = pd.read_csv(case_path)
 
@@ -317,7 +320,7 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         else:
             raise ValueError(
                 f"Unsupported time-series file format '{suffix}'. "
-                "Supported formats are .p, .pkl, .pickle, .csv, and .npz."
+                "Supported formats are .p, .pkl, .pickle, .parquet, .csv, and .npz."
             )
 
         return data, case_path
@@ -622,13 +625,55 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         My_grid : numpy array[n_grid, n_time], [N*m]
             Bending moment about local y axis on the aeroelastic solver grid (SI).
         """
-        data, case_path = self._load_time_series_data(ts_dir, case_file)
+        case_path_for_suffix = Path(case_file)
 
-        time = self._load_time_series_key_from_candidates(
-            data=data,
-            case_path=case_path,
-            keys=("Time", "time"),
-        )
+        if not case_path_for_suffix.is_absolute():
+            case_path_for_suffix = Path(ts_dir) / case_path_for_suffix
+
+        required_load_columns = []
+
+        for load_keys in load_key_map:
+            for load_name in ("Fz", "Mx", "My"):
+                required_load_columns.append(load_keys[load_name])
+
+        required_load_columns = list(dict.fromkeys(required_load_columns))
+
+        if case_path_for_suffix.suffix.lower() == ".parquet":
+            data = None
+            case_path = None
+            time = None
+            last_error = None
+
+            for time_key in ("Time", "time"):
+                required_columns = list(dict.fromkeys([time_key] + required_load_columns))
+
+                try:
+                    data, case_path = self._load_time_series_data(
+                        ts_dir,
+                        case_file,
+                        columns=required_columns,
+                    )
+                    time = self._extract_time_series_key(data, case_path, time_key)
+                    break
+                except ImportError:
+                    raise
+                except Exception as err:
+                    last_error = err
+
+            if time is None:
+                raise KeyError(
+                    f"Unable to load the required time and tower-load columns "
+                    f"from {case_path_for_suffix}."
+                ) from last_error
+
+        else:
+            data, case_path = self._load_time_series_data(ts_dir, case_file)
+
+            time = self._load_time_series_key_from_candidates(
+                data=data,
+                case_path=case_path,
+                keys=("Time", "time"),
+            )
 
         time = np.asarray(time, dtype=float).squeeze()
 
