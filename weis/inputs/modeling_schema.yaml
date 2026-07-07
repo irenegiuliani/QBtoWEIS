@@ -258,7 +258,12 @@ properties:
     QBlade: &qb_modopt
         type: object
         default: {}
-        description: Options for running QBlade.  No further options are included in this file.  They are populated using the qblade schema.
+        description: Options for running QBlade.  Most options are populated using the qblade schema.
+        properties:
+            profile:
+                type: boolean
+                default: False
+                description: Enable concise QBlade timing prints for compute, freeze-load return, wrapper execution, and post-processing. Disabled by default.
     OpenFAST: &of_modopt
         type: object
         default: {}
@@ -1146,6 +1151,10 @@ properties:
                 type: boolean
                 default: False
                 description: Enable tower fatigue post-processing. Requires QBlade.flag=True and flags.tower=True. Forces General.qblade_configuration.save_timeseries=True automatically.
+            profile:
+                type: boolean
+                default: False
+                description: Enable concise timing prints inside TowerFatiguePostFrame for file loading, interpolation, stress reconstruction, rainflow counting, S-N/Miner damage, and total compute. Disabled by default.
             n_theta:
                 type: integer
                 default: 36

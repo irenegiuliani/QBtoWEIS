@@ -25,6 +25,7 @@ import logging
 import pickle
 import subprocess
 from pathlib import Path
+from time import perf_counter
 from scipy.interpolate                      import PchipInterpolator
 from openmdao.api                           import ExplicitComponent
 from wisdem.commonse import NFREQ
@@ -473,11 +474,23 @@ class QBLADELoadCases(ExplicitComponent):
         print("############################################################")
 
         modopt_top = self.options['modeling_options']
+        # Enable with modeling_options["QBlade"]["profile"] = True.
+        profile = bool(modopt_top.get("QBlade", {}).get("profile", False))
+        if profile:
+            compute_start = perf_counter()
+            print(
+                f"[QBLADELoadCases][compute] START qb_inumber={self.qb_inumber} "
+                f"freeze_loads={modopt_top['QBlade']['freeze_loads']} "
+                f"freeze_mode={self.freeze_mode}",
+                flush=True,
+            )
         # Fixed-load freeze: return the previously computed outputs without running QBlade.
         # Only active when modeling_options['QBlade']['freeze_loads'] is True AND the outer
         # loop script has set self.freeze_mode = True after a successful QBlade evaluation.
         # qb_inumber is intentionally NOT incremented so directory naming stays consistent.
         if modopt_top['QBlade']['freeze_loads'] and self.freeze_mode and self._frozen_outputs:
+            if profile:
+                freeze_start = perf_counter()
             print("[QBLADELoadCases] freeze_loads is active — returning frozen loads, skipping QBlade")
             for name, val in self._frozen_outputs.items():
                 outputs[name] = val
@@ -490,6 +503,13 @@ class QBLADELoadCases(ExplicitComponent):
                     )
                 for k, v in self._frozen_tower_fatigue_metadata.items():
                     discrete_outputs[k] = copy.deepcopy(v)
+            if profile:
+                print(
+                    f"[QBLADELoadCases][compute] FREEZE RETURN "
+                    f"elapsed={perf_counter() - freeze_start:.3f}s "
+                    f"total_compute={perf_counter() - compute_start:.3f}s",
+                    flush=True,
+                )
             return
 
         cache = self.options['cache']
@@ -519,24 +539,51 @@ class QBLADELoadCases(ExplicitComponent):
         
         modopt = self.options['modeling_options']
         sys.stdout.flush() 
+        if profile:
+            init_start = perf_counter()
         qb_vt = self.init_QBlade_model()
+        if profile:
+            print(f"[QBLADELoadCases][timing] init_QBlade_model total = {perf_counter() - init_start:.3f}s", flush=True)
         
         if not modopt['QBlade']['from_qblade']:
+            if profile:
+                update_start = perf_counter()
             qb_vt = self.update_QBLADE_model(qb_vt, inputs, discrete_inputs)
+            if profile:
+                print(f"[QBLADELoadCases][timing] update_QBLADE_model total = {perf_counter() - update_start:.3f}s", flush=True)
         
 
         if self.model_only == True:
             # Write input QB files, but do not run QB
+            if profile:
+                write_start = perf_counter()
             self.write_QBLADE(qb_vt, inputs, discrete_inputs)
+            if profile:
+                print(f"[QBLADELoadCases][timing] write_QBLADE total = {perf_counter() - write_start:.3f}s", flush=True)
         else:
             # Write input QB files and run QB
             if not qb_vt['QSim']['DLCGenerator']:
+                if profile:
+                    write_start = perf_counter()
                 self.write_QBLADE(qb_vt, inputs, discrete_inputs)
+                if profile:
+                    print(f"[QBLADELoadCases][timing] write_QBLADE total = {perf_counter() - write_start:.3f}s", flush=True)
+            if profile:
+                run_start = perf_counter()
             summary_stats, extreme_table, DELs, Damage, chan_time, dlc_generator = self.run_QBLADE(inputs, discrete_inputs, qb_vt)
+            if profile:
+                print(f"[QBLADELoadCases][timing] run_QBLADE total = {perf_counter() - run_start:.3f}s", flush=True)
             # post process results
+            if profile:
+                post_start = perf_counter()
             self.post_process(summary_stats, extreme_table, DELs, Damage, chan_time, inputs, outputs, discrete_inputs, dlc_generator, discrete_outputs)
+            if profile:
+                print(f"[QBLADELoadCases][timing] post_process total = {perf_counter() - post_start:.3f}s", flush=True)
 
             self.qb_inumber += 1
+
+        if profile:
+            print(f"[QBLADELoadCases][timing] total_compute = {perf_counter() - compute_start:.3f}s", flush=True)
 
     def _coerce_hydro_pair(self, raw_value, field_name, member_name):
         if isinstance(raw_value, np.ndarray):
@@ -1892,6 +1939,7 @@ class QBLADELoadCases(ExplicitComponent):
         qblade.store_qprs           = modopt['General']['qblade_configuration']['store_qprs']
         qblade.out_file_format      = modopt['General']['qblade_configuration']['out_file_format']
         qblade.delete_out_files     = modopt['General']['qblade_configuration']['delete_out_files']
+        qblade.profile              = bool(modopt.get("QBlade", {}).get("profile", False))
         
         qblade.channels = self.output_channels()
         magnitude_channels = dict( qbwrap.magnitude_channels_default )
@@ -2314,6 +2362,17 @@ class QBLADELoadCases(ExplicitComponent):
         # leaning heavily on equivalent funtion in "openmdao_openfast.py"
         # TODO do the post-processing acutally for DLCs and not only idealized cases
         modopt = self.options['modeling_options']
+        profile = bool(modopt.get("QBlade", {}).get("profile", False))
+        if profile:
+            post_process_start = perf_counter()
+
+        def _time_post(label, func, *args):
+            if not profile:
+                return func(*args)
+            start = perf_counter()
+            result = func(*args)
+            print(f"[QBLADELoadCases][post] {label} = {perf_counter() - start:.3f}s", flush=True)
+            return result
         
         failed_sim_ids = self.get_failed_sim_ids()
         if failed_sim_ids:
@@ -2323,53 +2382,55 @@ class QBLADELoadCases(ExplicitComponent):
         
         if not self.qb_vt['Turbine']['NOSTRUCTURE']:
             if self.options['modeling_options']['flags']['blade']:
-                outputs = self.get_blade_loading(summary_stats, extreme_table, inputs, outputs)
-                outputs = self.get_rotor_loading(summary_stats, outputs)
+                outputs = _time_post("get_blade_loading", self.get_blade_loading, summary_stats, extreme_table, inputs, outputs)
+                outputs = _time_post("get_rotor_loading", self.get_rotor_loading, summary_stats, outputs)
             if self.options['modeling_options']['flags']['tower']:
-                outputs = self.get_tower_loading(summary_stats, extreme_table, inputs, outputs)
+                outputs = _time_post("get_tower_loading", self.get_tower_loading, summary_stats, extreme_table, inputs, outputs)
             if modopt['flags']['monopile']:
                 try:
-                    outputs = self.get_monopile_loading(summary_stats, extreme_table, inputs, outputs)
+                    outputs = _time_post("get_monopile_loading", self.get_monopile_loading, summary_stats, extreme_table, inputs, outputs)
                 except Exception as e:
                     logger.error(f"[MONOPILE LOADING] Error in get_monopile_loading: {e}", exc_info=True)
                     return outputs
             if modopt['flags']['mooring']:
                 try:
-                    outputs = self.get_mooring_loading(summary_stats, inputs, outputs)
+                    outputs = _time_post("get_mooring_loading", self.get_mooring_loading, summary_stats, inputs, outputs)
                 except Exception as e:
                     logger.error(f"[MOORING LOADING] Error in get_mooring_loading: {e}", exc_info=True)
                     return outputs
 
             # AEP calculation is not very robust when various simulations in an iteration fail. to avoid crashing a full optimization, we wrap it in a try/except block
             try:
-                outputs = self.calculate_AEP(summary_stats, inputs, outputs, discrete_inputs, dlc_generator, failed_sim_ids)
+                outputs = _time_post("calculate_AEP", self.calculate_AEP, summary_stats, inputs, outputs, discrete_inputs, dlc_generator, failed_sim_ids)
             except IndexError as ie:
                 logger.warning(f"[AEP] IndexError in calculate_AEP: {ie}. Skipping AEP calculation this iteration.")
             except Exception as e:
                 logger.error(f"[AEP] Unexpected error in calculate_AEP: {e}", exc_info=True)
 
-            outputs = self.get_weighted_DELs(DELs, damage, discrete_inputs, outputs, dlc_generator, failed_sim_ids)
+            outputs = _time_post("get_weighted_DELs", self.get_weighted_DELs, DELs, damage, discrete_inputs, outputs, dlc_generator, failed_sim_ids)
             
-            outputs = self.get_control_measures(summary_stats, chan_time, inputs, outputs)
+            outputs = _time_post("get_control_measures", self.get_control_measures, summary_stats, chan_time, inputs, outputs)
 
             if modopt['flags']['floating']: # TODO: or (modopt['QBlade']['from_qblade'] and self.qb_vt['Fst']['CompMooring']>0):
-                outputs = self.get_floating_measures(summary_stats, chan_time, inputs, outputs)
+                outputs = _time_post("get_floating_measures", self.get_floating_measures, summary_stats, chan_time, inputs, outputs)
             
             # Save Data
             if modopt['General']['qblade_configuration']['save_timeseries']:
-                self.save_timeseries(chan_time, dlc_generator, failed_sim_ids)
+                _time_post("save_timeseries", self.save_timeseries, chan_time, dlc_generator, failed_sim_ids)
 
             if modopt['General']['qblade_configuration']['save_iterations']:
-                self.save_iterations(summary_stats,DELs,discrete_outputs)
+                _time_post("save_iterations", self.save_iterations, summary_stats, DELs, discrete_outputs)
 
             if modopt['General']['qblade_configuration']['store_turbines']:
-                self.store_turbines()
+                _time_post("store_turbines", self.store_turbines)
 
             # Populate tower fatigue discrete metadata.
             # Guarded by TowerFatigue.flag AND save_timeseries — the .p files must
             # already exist before this block records their paths.
             if (modopt.get("TowerFatigue", {}).get("flag", False)
                     and modopt['General']['qblade_configuration']['save_timeseries']):
+                if profile:
+                    tower_fatigue_metadata_start = perf_counter()
 
                 ts_dir = os.path.join(
                     self.QBLADE_runDirectory,
@@ -2438,6 +2499,12 @@ class QBLADELoadCases(ExplicitComponent):
                 discrete_outputs['tower_fatigue_load_channels']   = tuple(
                     self._build_qblade_tower_fatigue_load_channels()
                 )
+                if profile:
+                    print(
+                        f"[QBLADELoadCases][post] tower_fatigue_metadata = "
+                        f"{perf_counter() - tower_fatigue_metadata_start:.3f}s",
+                        flush=True,
+                    )
 
             # Fixed-load outer-loop: capture outputs so they can be returned frozen on
             # subsequent optimizer evaluations.  This runs unconditionally when
@@ -2455,6 +2522,7 @@ class QBLADELoadCases(ExplicitComponent):
                     self._frozen_tower_fatigue_metadata = {
                         k: copy.deepcopy(discrete_outputs[k]) for k in _tf_keys
                     }
+
                 freeze_save_dir = os.path.join(self.QBLADE_runDirectory,
                                                'iteration_' + str(self.qb_inumber))
                 os.makedirs(freeze_save_dir, exist_ok=True)
@@ -2464,6 +2532,9 @@ class QBLADELoadCases(ExplicitComponent):
                 print(f"[QBLADELoadCases] Frozen loads saved to {frozen_loads_path}")
         else:
             outputs = self.calculate_AEP(summary_stats, inputs, outputs, discrete_inputs)
+
+        if profile:
+            print(f"[QBLADELoadCases][post] total post_process = {perf_counter() - post_process_start:.3f}s", flush=True)
 
     def get_weighted_DELs(self, DELs, damage, discrete_inputs, outputs, dlc_generator, failed_sim_ids):
         modopt = self.options['modeling_options']

@@ -25,6 +25,7 @@ import logging
 import re
 import sys
 import time
+from time import perf_counter
 
 weis_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
@@ -89,6 +90,8 @@ class QBladeWrapper:
         self.turbsim_params     = {}
         self.out_file_format    = 2
         self.delete_out_files   = True
+        # Set by QBLADELoadCases from modeling_options["QBlade"]["profile"].
+        self.profile            = False
 
         self.goodman            = False
         self.magnitude_channels = magnitude_channels_default
@@ -105,17 +108,28 @@ class QBladeWrapper:
             )
     def run_qblade_cases(self):
         start_time = time.time()
+        if self.profile:
+            run_qblade_cases_start = perf_counter()
+            execute_start = perf_counter()
         
         self.execute()
+
+        if self.profile:
+            print(f"[QBladeWrapper][timing] execute = {perf_counter() - execute_start:.3f}s", flush=True)
 
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(f"Elapsed time to complete all QBlade simulation: {elapsed_time:.2f} seconds.")
 
+        if self.profile:
+            analysis_start = perf_counter()
         if self.number_of_workers == 1:
             summary_stats, extreme_table, DELs, Damage, ct =  self.run_serial()	
         else :
             summary_stats, extreme_table, DELs, Damage, ct =  self.run_multi()
+        if self.profile:
+            print(f"[QBladeWrapper][timing] output_analysis_pCrunch = {perf_counter() - analysis_start:.3f}s", flush=True)
+            print(f"[QBladeWrapper][timing] total run_qblade_cases = {perf_counter() - run_qblade_cases_start:.3f}s", flush=True)
         
         return summary_stats, extreme_table, DELs, Damage, ct
     
@@ -123,18 +137,26 @@ class QBladeWrapper:
         self.init_crunch()
 
         # Filter only .out files and sort them
+        if self.profile:
+            discovery_start = perf_counter()
         all_files_in_dir = os.listdir(self.QBLADE_runDirectory)
         if self.out_file_format == 1:   # ASCII
             out_files = sorted([f for f in all_files_in_dir if f.endswith(".out")])
         elif self.out_file_format == 2: # Binary
             out_files = sorted([f for f in all_files_in_dir if f.endswith(".outb")])
+        if self.profile:
+            print(f"[QBladeWrapper][run_multi] file_discovery = {perf_counter() - discovery_start:.3f}s", flush=True)
 
+        if self.profile:
+            parallel_start = perf_counter()
         if sys.platform == "linux": # ProcessPoolExecutor is a bit quicker but doesn't work under windows
             with ProcessPoolExecutor(max_workers=self.number_of_workers) as executor:
                 results = list(executor.map(self.parallel_analyze_cases, out_files))
         else:
             with ThreadPoolExecutor(max_workers=self.number_of_workers) as executor:
                 results = list(executor.map(self.parallel_analyze_cases, out_files))
+        if self.profile:
+            print(f"[QBladeWrapper][run_multi] parallel analyze_cases = {perf_counter() - parallel_start:.3f}s", flush=True)
 
         ss = {}
         et = {}
@@ -155,7 +177,11 @@ class QBladeWrapper:
                 os.remove(os.path.join(self.QBLADE_runDirectory, f))
                 print(f"Successfully deleted {f}.")
 
+        if self.profile:
+            post_start = perf_counter()
         summary_stats, extreme_table, DELs, Damage = self.la.post_process(ss, et, dl, dam)
+        if self.profile:
+            print(f"[QBladeWrapper][run_multi] pCrunch post_process = {perf_counter() - post_start:.3f}s", flush=True)
 
         return summary_stats, extreme_table, DELs, Damage, ct
 
@@ -167,11 +193,15 @@ class QBladeWrapper:
         self.init_crunch()
 
         # Filter only .out files and sort them
+        if self.profile:
+            discovery_start = perf_counter()
         all_files_in_dir = os.listdir(self.QBLADE_runDirectory)
         if self.out_file_format == 1:   # ASCII
             out_files = sorted([f for f in all_files_in_dir if f.endswith(".out")])
         elif self.out_file_format == 2: # Binary
             out_files = sorted([f for f in all_files_in_dir if f.endswith(".outb")])
+        if self.profile:
+            print(f"[QBladeWrapper][run_serial] file_discovery = {perf_counter() - discovery_start:.3f}s", flush=True)
         
         ss = {}
         et = {}
@@ -179,15 +209,23 @@ class QBladeWrapper:
         dam = {}
         ct = []
 
+        if self.profile:
+            analyze_all_start = perf_counter()
         for c in out_files:
             QBLADE_Output_txt = os.path.join(self.QBLADE_runDirectory, c)
 
+            if self.profile:
+                analyze_start = perf_counter()
             _name, _ss, _et, _dl, _dam, _ct = self.analyze_cases(QBLADE_Output_txt)
+            if self.profile:
+                print(f"[QBladeWrapper][run_serial] analyze_cases {c} = {perf_counter() - analyze_start:.3f}s", flush=True)
             ss[_name] = _ss
             et[_name] = _et
             dl[_name] = _dl
             dam[_name] = _dam
             ct.append(_ct)
+        if self.profile:
+            print(f"[QBladeWrapper][run_serial] total analyze all cases = {perf_counter() - analyze_all_start:.3f}s", flush=True)
         
         # Delete the .out files after processing
         if self.delete_out_files:
@@ -195,7 +233,11 @@ class QBladeWrapper:
                 os.remove(os.path.join(self.QBLADE_runDirectory, f))
                 print(f"Successfully deleted {f}.")
         
+        if self.profile:
+            post_start = perf_counter()
         summary_stats, extreme_table, DELs, Damage = self.la.post_process(ss, et, dl, dam)
+        if self.profile:
+            print(f"[QBladeWrapper][run_serial] final post_process = {perf_counter() - post_start:.3f}s", flush=True)
         
         return summary_stats, extreme_table, DELs, Damage, ct
         
@@ -242,12 +284,18 @@ class QBladeWrapper:
 
 
     def analyze_cases(self, case):
+        if self.profile:
+            analyze_case_start = perf_counter()
+            file_read_start = perf_counter()
         if self.out_file_format == 1 and os.path.exists(case):
             output_init = OpenFASTAscii(case, magnitude_channels=self.magnitude_channels)
         if self.out_file_format == 2 and  os.path.exists(case):
             output_init = OpenFASTBinary(case, magnitude_channels=self.magnitude_channels)
 
         output_init.read()
+        if self.profile:
+            file_read_time = perf_counter() - file_read_start
+            scale_start = perf_counter()
 
         # Make output dict
         output_dict = {}
@@ -284,9 +332,21 @@ class QBladeWrapper:
         # Trim Data
         if self.qb_vt['QSim']['STOREFROM'] > 0.0 and not self.qb_vt['QSim']['DLCGenerator']: # in DLCGenerator QBlade never stores the values during the "tansient_time"
             output.trim_data(tmin=self.qb_vt['QSim']['STOREFROM'], tmax=self.qb_vt['QSim']['TMax'])
+        if self.profile:
+            scale_time = perf_counter() - scale_start
+            process_start = perf_counter()
         case_name, sum_stats, extremes, dels, damage = self.la._process_output(output,
                                                                             return_damage=True,
                                                                             goodman_correction=self.goodman)
+        if self.profile:
+            process_time = perf_counter() - process_start
+            total_time = perf_counter() - analyze_case_start
+            print(
+                f"[QBladeWrapper][analyze] file={filename} "
+                f"read={file_read_time:.3f}s scale_output={scale_time:.3f}s "
+                f"pCrunch_process={process_time:.3f}s total={total_time:.3f}s",
+                flush=True,
+            )
         
         return case_name, sum_stats, extremes, dels, damage, output_dict        
 

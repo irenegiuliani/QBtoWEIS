@@ -105,7 +105,9 @@ series using the high-level fatpack interface used by pCrunch. Case probability
 mass is used exactly as supplied by the upstream metadata.
 """
 
+from collections import defaultdict
 from pathlib import Path
+from time import perf_counter
 
 import fatpack
 import numpy as np
@@ -304,6 +306,9 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
 
         suffix = case_path.suffix.lower()
 
+        if hasattr(self, "_tf_prof"):
+            read_start = perf_counter()
+
         if suffix in (".p", ".pkl", ".pickle"):
             data = pd.read_pickle(case_path)
 
@@ -322,6 +327,9 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
                 f"Unsupported time-series file format '{suffix}'. "
                 "Supported formats are .p, .pkl, .pickle, .parquet, .csv, and .npz."
             )
+
+        if hasattr(self, "_tf_prof"):
+            self._tf_prof["raw_file_read"] += perf_counter() - read_start
 
         return data, case_path
 
@@ -1062,9 +1070,18 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         if rainflow_ranges_bins <= 0:
             raise ValueError("rainflow_ranges_bins must be positive.")
 
+        if hasattr(self, "_tf_prof"):
+            self._tf_prof["rainflow_calls"] += 1.0
+
         try:
+            if hasattr(self, "_tf_prof"):
+                rainflow_start = perf_counter()
             ranges = fatpack.find_rainflow_ranges(stress)
+            if hasattr(self, "_tf_prof"):
+                self._tf_prof["rainflow_find_ranges"] += perf_counter() - rainflow_start
         except ValueError:
+            if hasattr(self, "_tf_prof"):
+                self._tf_prof["rainflow_find_ranges"] += perf_counter() - rainflow_start
             return np.zeros(0), np.zeros(0)
 
         ranges = np.atleast_1d(np.asarray(ranges, dtype=float).squeeze())
@@ -1078,7 +1095,11 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         if ranges.size == 0:
             return np.zeros(0), np.zeros(0)
 
+        if hasattr(self, "_tf_prof"):
+            binning_start = perf_counter()
         counts, ranges = fatpack.find_range_count(ranges, rainflow_ranges_bins)
+        if hasattr(self, "_tf_prof"):
+            self._tf_prof["rainflow_binning"] += perf_counter() - binning_start
         counts = np.atleast_1d(np.asarray(counts, dtype=float).squeeze())
         ranges = np.atleast_1d(np.asarray(ranges, dtype=float).squeeze())
 
@@ -1106,12 +1127,19 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         The returned damage is the simulated-time damage before lifetime
         scaling.
         """
+        if hasattr(self, "_tf_prof"):
+            damage_from_stress_start = perf_counter()
+
         stress = np.asarray(stress, dtype=float).squeeze()
 
         if stress.ndim != 1:
             raise ValueError("stress must be one-dimensional.")
 
         if stress.size < 2:
+            if hasattr(self, "_tf_prof"):
+                self._tf_prof["damage_from_stress_total"] += (
+                    perf_counter() - damage_from_stress_start
+                )
             return 0.0
 
         if np.any(~np.isfinite(stress)):
@@ -1120,7 +1148,14 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         stress_ranges_pa, counts = self._rainflow_ranges_counts(stress)
 
         if stress_ranges_pa.size == 0:
+            if hasattr(self, "_tf_prof"):
+                self._tf_prof["damage_from_stress_total"] += (
+                    perf_counter() - damage_from_stress_start
+                )
             return 0.0
+
+        if hasattr(self, "_tf_prof"):
+            sn_miner_start = perf_counter()
 
         sn_k = float(inputs["sn_k_full"])
         sn_tref = float(inputs["sn_tref_full"])
@@ -1138,6 +1173,11 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         valid = stress_ranges_corr_mpa > 0.0
 
         if not np.any(valid):
+            if hasattr(self, "_tf_prof"):
+                self._tf_prof["sn_miner"] += perf_counter() - sn_miner_start
+                self._tf_prof["damage_from_stress_total"] += (
+                    perf_counter() - damage_from_stress_start
+                )
             return 0.0
 
         stress_ranges_corr_mpa = stress_ranges_corr_mpa[valid]
@@ -1200,6 +1240,12 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
             raise ValueError("Cycles to failure must be positive.")
 
         damage = np.sum(counts / cycles_to_failure)
+
+        if hasattr(self, "_tf_prof"):
+            self._tf_prof["sn_miner"] += perf_counter() - sn_miner_start
+            self._tf_prof["damage_from_stress_total"] += (
+                perf_counter() - damage_from_stress_start
+            )
 
         return float(damage)
 
@@ -1329,6 +1375,8 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
             My = My_case[i_sec, :]
 
             for i_theta in range(theta.size):
+                if hasattr(self, "_tf_prof"):
+                    stress_start = perf_counter()
                 stress = self.calculate_stress(
                     Fz=Fz,
                     Mx=Mx,
@@ -1340,6 +1388,8 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
                     cos_theta=cos_theta[i_theta],
                     section_fatigue_scf=section_fatigue_scf,
                 )
+                if hasattr(self, "_tf_prof"):
+                    self._tf_prof["stress_reconstruction"] += perf_counter() - stress_start
 
                 damage_theta[i_sec, i_theta] += (
                     scale_to_life
@@ -1438,18 +1488,46 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         n_full = self.options["n_full"]
         n_theta = self.options["n_theta"]
         n_sec = n_full - 1
+        tower_fatigue_options = self.options["modeling_options"].get("TowerFatigue", {})
+        # Enable with modeling_options["TowerFatigue"]["profile"] = True.
+        profile = bool(tower_fatigue_options.get("profile", False))
+
+        if profile:
+            self._tf_prof = defaultdict(float)
+            self._tf_compute_call = getattr(self, "_tf_compute_call", 0) + 1
+            compute_start = perf_counter()
+            print(
+                f"[TowerFatigue][compute #{self._tf_compute_call}] "
+                f"START n_full={n_full}, n_theta={n_theta}",
+                flush=True,
+            )
+        elif hasattr(self, "_tf_prof"):
+            del self._tf_prof
 
         if discrete_inputs is None:
             raise ValueError("TowerFatiguePostFrame requires discrete time-series metadata.")
 
+        if hasattr(self, "_tf_prof"):
+            check_start = perf_counter()
         self._check_continuous_fatigue_inputs(inputs)
-        metadata = self._get_tower_fatigue_metadata(discrete_inputs)
+        if hasattr(self, "_tf_prof"):
+            self._tf_prof["check_inputs"] += perf_counter() - check_start
 
+        if hasattr(self, "_tf_prof"):
+            metadata_start = perf_counter()
+        metadata = self._get_tower_fatigue_metadata(discrete_inputs)
+        if hasattr(self, "_tf_prof"):
+            self._tf_prof["metadata"] += perf_counter() - metadata_start
+
+        if hasattr(self, "_tf_prof"):
+            section_start = perf_counter()
         section_props = self._compute_tower_section_properties(
             z_full=inputs["z_full"],
             outer_diameter_full=inputs["outer_diameter_full"],
             t_full=inputs["t_full"],
         )
+        if hasattr(self, "_tf_prof"):
+            self._tf_prof["section_properties"] += perf_counter() - section_start
 
         theta_stress_points = np.linspace(
             0.0,
@@ -1464,6 +1542,8 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         outputs["theta_stress_points"] = theta_stress_points
 
         damage_theta = np.zeros((n_sec, n_theta))
+        active_cases = 0
+        skipped_zero_probability_cases = 0
 
         for i_case, case_file in enumerate(metadata["case_files"]):
             case_probability = float(metadata["case_probability"][i_case])
@@ -1479,9 +1559,16 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
                 )
 
             if case_probability == 0.0:
+                skipped_zero_probability_cases += 1
                 continue
 
+            active_cases += 1
+            if hasattr(self, "_tf_prof"):
+                case_start = perf_counter()
+
             # Load one active case and convert raw solver units to SI.
+            if hasattr(self, "_tf_prof"):
+                load_start = perf_counter()
             time, Fz_grid, Mx_grid, My_grid = (
                 self._load_case_tower_loads_on_solver_grid(
                     ts_dir=metadata["ts_dir"],
@@ -1491,10 +1578,15 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
                     load_scale_map=metadata["load_scale_map"],
                 )
             )
+            if hasattr(self, "_tf_prof"):
+                load_time = perf_counter() - load_start
+                self._tf_prof["case_load_files"] += load_time
 
             case_duration = float(time[-1] - time[0])
 
             # Interpolate loads from the solver tower grid to TowerSE section centers.
+            if hasattr(self, "_tf_prof"):
+                interp_start = perf_counter()
             Fz_case, Mx_case, My_case = self._interpolate_tower_loads_to_sections(
                 tower_grid=metadata["tower_grid"],
                 Fz_grid=Fz_grid,
@@ -1503,8 +1595,13 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
                 section_z=section_props["section_z"],
                 z_full=inputs["z_full"],
             )
+            if hasattr(self, "_tf_prof"):
+                interp_time = perf_counter() - interp_start
+                self._tf_prof["case_interpolation"] += interp_time
 
             # Accumulate lifetime-scaled fatigue damage for this case.
+            if hasattr(self, "_tf_prof"):
+                damage_start = perf_counter()
             damage_theta += self.calculate_damage_for_case(
                 Fz_case=Fz_case,
                 Mx_case=Mx_case,
@@ -1515,11 +1612,58 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
                 theta_stress_points=theta_stress_points,
                 inputs=inputs,
             )
+            if hasattr(self, "_tf_prof"):
+                damage_time = perf_counter() - damage_start
+                self._tf_prof["case_damage_total"] += damage_time
+                case_total = perf_counter() - case_start
+                print(
+                    f"[TowerFatigue][case {i_case:03d}] "
+                    f"file={case_file} prob={case_probability:.6g} "
+                    f"n_time={time.size} duration={case_duration:.3f}s | "
+                    f"load={load_time:.3f}s interp={interp_time:.3f}s "
+                    f"damage={damage_time:.3f}s total={case_total:.3f}s",
+                    flush=True,
+                )
 
         fatigue_damage = np.max(damage_theta, axis=1)
 
         outputs["fatigue_damage"] = fatigue_damage
         outputs["constr_fatigue"] = fatigue_damage * inputs["fatigue_design_factor"]
+
+        if profile:
+            total_compute = perf_counter() - compute_start
+            self._tf_prof["total_compute"] += total_compute
+            summary_keys = (
+                "check_inputs",
+                "metadata",
+                "section_properties",
+                "raw_file_read",
+                "case_load_files",
+                "case_interpolation",
+                "case_damage_total",
+                "stress_reconstruction",
+                "damage_from_stress_total",
+                "rainflow_find_ranges",
+                "rainflow_binning",
+                "sn_miner",
+            )
+            print("[TowerFatigue][SUMMARY]", flush=True)
+            print(f"  total_compute                  = {total_compute:.3f} s", flush=True)
+            print(f"  active_cases                   = {active_cases}", flush=True)
+            print(
+                f"  skipped_zero_probability_cases = {skipped_zero_probability_cases}",
+                flush=True,
+            )
+            for key in summary_keys:
+                print(f"  {key:<30} = {self._tf_prof[key]:.3f} s", flush=True)
+            print(
+                f"  rainflow_calls                 = {int(self._tf_prof['rainflow_calls'])}",
+                flush=True,
+            )
+            print(
+                f"  max_fatigue_damage             = {float(np.max(fatigue_damage)):.6e}",
+                flush=True,
+            )
 
 if __name__ == "__main__":
     pass

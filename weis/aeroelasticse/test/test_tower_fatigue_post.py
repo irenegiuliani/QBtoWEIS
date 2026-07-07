@@ -17,6 +17,8 @@ numbers, regenerate the golden values with:
 import os
 import sys
 import tempfile
+import contextlib
+import io
 
 import numpy as np
 import pandas as pd
@@ -37,7 +39,7 @@ N_THETA = 8
 GRID_POSITIONS = [0.0, 0.33, 0.67, 1.0]
 
 
-def _build_synthetic_tower_fatigue_case(tmpdir):
+def _build_synthetic_tower_fatigue_case(tmpdir, include_zero_probability_case=False):
     """Build a synthetic tower geometry plus two synthetic load-time-series
     cases on disk. Returns (geometry_dict, discrete_inputs_dict).
 
@@ -89,17 +91,41 @@ def _build_synthetic_tower_fatigue_case(tmpdir):
         "tower_fatigue_load_channels": tuple(load_channels),
     }
 
+    if include_zero_probability_case:
+        discrete["tower_fatigue_case_names"] = (
+            discrete["tower_fatigue_case_names"] + ("case_zero_probability",)
+        )
+        discrete["tower_fatigue_case_probability"] = (
+            discrete["tower_fatigue_case_probability"] + (0.0,)
+        )
+        discrete["tower_fatigue_case_files"] = (
+            discrete["tower_fatigue_case_files"] + ("missing_zero_probability_case.p",)
+        )
+
     return geometry, discrete
 
 
-def _run_tower_fatigue_component(sn_model="bilinear"):
+def _run_tower_fatigue_component(
+    sn_model="bilinear",
+    profile=False,
+    include_zero_probability_case=False,
+    capture_stdout=False,
+):
     with tempfile.TemporaryDirectory() as tmpdir:
-        geometry, discrete = _build_synthetic_tower_fatigue_case(tmpdir)
+        geometry, discrete = _build_synthetic_tower_fatigue_case(
+            tmpdir,
+            include_zero_probability_case=include_zero_probability_case,
+        )
 
         prob = om.Problem()
         prob.model.add_subsystem(
             "tower_fatigue_post",
-            TowerFatiguePostFrame(n_full=N_FULL, n_theta=N_THETA, sn_model=sn_model),
+            TowerFatiguePostFrame(
+                n_full=N_FULL,
+                n_theta=N_THETA,
+                sn_model=sn_model,
+                modeling_options={"TowerFatigue": {"profile": profile}},
+            ),
         )
         prob.setup()
 
@@ -108,13 +134,23 @@ def _run_tower_fatigue_component(sn_model="bilinear"):
         for key, val in discrete.items():
             prob.set_val(f"tower_fatigue_post.{key}", val)
 
-        prob.run_model()
+        stdout = io.StringIO()
+        if capture_stdout:
+            with contextlib.redirect_stdout(stdout):
+                prob.run_model()
+        else:
+            prob.run_model()
 
-        return {
+        values = {
             "fatigue_damage": prob.get_val("tower_fatigue_post.fatigue_damage").copy(),
             "constr_fatigue": prob.get_val("tower_fatigue_post.constr_fatigue").copy(),
             "section_A": prob.get_val("tower_fatigue_post.section_A").copy(),
         }
+
+        if capture_stdout:
+            values["stdout"] = stdout.getvalue()
+
+        return values
 
 
 class TestTowerFatiguePost(unittest.TestCase):
@@ -142,6 +178,32 @@ class TestTowerFatiguePost(unittest.TestCase):
         # Fold the module's built-in unit-conversion smoke test into the
         # pytest-discovered suite so CI actually exercises it.
         _smoke_test_scale_to_si()
+
+    def test_profile_does_not_change_results_and_skips_zero_probability_cases(self):
+        values_no_profile = _run_tower_fatigue_component(
+            sn_model="bilinear",
+            profile=False,
+            include_zero_probability_case=True,
+            capture_stdout=True,
+        )
+        values_profile = _run_tower_fatigue_component(
+            sn_model="bilinear",
+            profile=True,
+            include_zero_probability_case=True,
+            capture_stdout=True,
+        )
+
+        for key in ("fatigue_damage", "constr_fatigue", "section_A"):
+            np.testing.assert_allclose(
+                values_profile[key],
+                values_no_profile[key],
+                rtol=0.0,
+                atol=0.0,
+            )
+
+        self.assertNotIn("[TowerFatigue]", values_no_profile["stdout"])
+        self.assertIn("[TowerFatigue][SUMMARY]", values_profile["stdout"])
+        self.assertIn("skipped_zero_probability_cases = 1", values_profile["stdout"])
 
 
 if __name__ == "__main__":
