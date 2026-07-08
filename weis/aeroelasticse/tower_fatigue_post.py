@@ -117,6 +117,22 @@ import openmdao.api as om
 
 import wisdem.commonse.utilities as util
 import wisdem.commonse.cross_sections as cs
+import time
+
+class Cronometro:
+    def __enter__(self):
+        self.inizio = time.perf_counter()
+        return self
+
+    def __exit__(self, *args):
+        self.fine = time.perf_counter()
+        self.durata = self.fine - self.inizio
+        print(f"⏱️ Tempo impiegato: {self.durata:.4f} secondi")
+
+# Come usarlo:
+with Cronometro():
+    # Metti qui le righe di codice da monitorare
+    somma = sum(i * i for i in range(5_000_000))
 
 
 def _load_time_series_data(ts_dir, case_file, columns=None):
@@ -1111,6 +1127,7 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         when ``n_workers`` is greater than one, then accumulated in the
         original case order to keep deterministic results.
         """
+        t_start = time.perf_counter()
         n_full = self.options["n_full"]
         n_theta = self.options["n_theta"]
         n_sec = n_full - 1
@@ -1195,6 +1212,10 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
 
         fatigue_damage = np.max(damage_theta, axis=1)
 
+        t_end = time.perf_counter()
+        total_time = t_end - t_start
+        print(f"⏱️ Fatigue calculation total time: {total_time:.5f} s")
+        
         outputs["fatigue_damage"] = fatigue_damage
         outputs["constr_fatigue"] = fatigue_damage * fatigue_settings["fatigue_design_factor"]
 
