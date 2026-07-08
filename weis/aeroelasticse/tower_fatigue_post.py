@@ -105,6 +105,9 @@ series using the high-level fatpack interface used by pCrunch. Case probability
 mass is used exactly as supplied by the upstream metadata.
 """
 
+import concurrent.futures
+import os
+import tempfile
 from pathlib import Path
 
 import fatpack
@@ -114,6 +117,803 @@ import openmdao.api as om
 
 import wisdem.commonse.utilities as util
 import wisdem.commonse.cross_sections as cs
+
+
+def _load_time_series_data(ts_dir, case_file, columns=None):
+    """Load one saved time-series file."""
+    case_path = Path(case_file)
+    if not case_path.is_absolute():
+        case_path = Path(ts_dir) / case_path
+    if not case_path.exists():
+        raise FileNotFoundError(f"Time-series file not found: {case_path}")
+
+    suffix = case_path.suffix.lower()
+    if suffix in (".p", ".pkl", ".pickle"):
+        data = pd.read_pickle(case_path)
+    elif suffix == ".parquet":
+        data = pd.read_parquet(case_path, columns=columns)
+    elif suffix == ".csv":
+        data = pd.read_csv(case_path)
+    elif suffix == ".npz":
+        with np.load(case_path, allow_pickle=False) as npz_data:
+            data = {key: np.asarray(npz_data[key]) for key in npz_data.files}
+    else:
+        raise ValueError(
+            f"Unsupported time-series file format '{suffix}'. "
+            "Supported formats are .p, .pkl, .pickle, .parquet, .csv, and .npz."
+        )
+
+    return data, case_path
+
+
+def _extract_time_series_key(data, case_path, key):
+    """Extract one key from an already loaded time-series object."""
+    if key is None or str(key).strip() == "":
+        raise ValueError("key must be a non-empty string.")
+
+    if isinstance(data, pd.DataFrame):
+        available_keys = list(data.columns)
+        if key not in available_keys:
+            raise KeyError(
+                f"Key '{key}' not found in {case_path}. "
+                f"Available columns are: {available_keys}"
+            )
+        values = data[key].to_numpy(dtype=float)
+    elif isinstance(data, dict):
+        available_keys = list(data.keys())
+        if key not in available_keys:
+            raise KeyError(
+                f"Key '{key}' not found in {case_path}. "
+                f"Available keys are: {available_keys}"
+            )
+        values = np.asarray(data[key], dtype=float)
+    else:
+        raise TypeError(
+            f"Unsupported object loaded from {case_path}. "
+            "Expected a pandas DataFrame or a dictionary-like object."
+        )
+
+    values = np.asarray(values, dtype=float).squeeze()
+    if values.ndim != 1:
+        raise ValueError(
+            f"Key '{key}' in {case_path} must be one-dimensional after "
+            f"squeeze, but has shape {values.shape}."
+        )
+    if np.any(~np.isfinite(values)):
+        raise ValueError(f"Key '{key}' in {case_path} contains non-finite values.")
+
+    return values
+
+
+def _load_time_series_key_from_candidates(data, case_path, keys):
+    """Load the first available key from a list of candidate key names."""
+    last_error = None
+    for key in keys:
+        try:
+            return _extract_time_series_key(data, case_path, key)
+        except KeyError as err:
+            last_error = err
+    raise KeyError(f"None of the candidate keys {keys} was found in {case_path}.") from last_error
+
+
+def _parse_tower_fatigue_load_channels(tower_fatigue_load_channels):
+    """Parse and validate tower load-channel metadata."""
+    if not isinstance(tower_fatigue_load_channels, (list, tuple)):
+        raise ValueError("tower_fatigue_load_channels must be a list or tuple of dictionaries.")
+    if len(tower_fatigue_load_channels) < 2:
+        raise ValueError(
+            "tower_fatigue_load_channels must contain at least two tower grid "
+            "points for interpolation."
+        )
+
+    tower_grid = []
+    load_key_map = []
+    load_scale_map = []
+
+    for i_grid, channel in enumerate(tower_fatigue_load_channels):
+        if not isinstance(channel, dict):
+            raise ValueError(
+                "Each item in tower_fatigue_load_channels must be a dictionary. "
+                f"Item {i_grid} has type {type(channel)}."
+            )
+        if "twr_sec_pos" not in channel:
+            raise KeyError(
+                f"Item {i_grid} in tower_fatigue_load_channels is missing "
+                "the 'twr_sec_pos' field."
+            )
+        if "keys" not in channel:
+            raise KeyError(
+                f"Item {i_grid} in tower_fatigue_load_channels is missing the 'keys' field."
+            )
+
+        twr_sec_pos = float(channel["twr_sec_pos"])
+        if not np.isfinite(twr_sec_pos):
+            raise ValueError(f"'twr_sec_pos' for tower grid point {i_grid} must be finite.")
+
+        keys = channel["keys"]
+        if not isinstance(keys, dict):
+            raise ValueError(f"'keys' for tower grid point {i_grid} must be a dictionary.")
+
+        load_keys = {}
+        for load_name in ("Fz", "Mx", "My"):
+            if load_name not in keys:
+                raise KeyError(
+                    f"'keys' for tower grid point {i_grid} must contain '{load_name}'."
+                )
+            key = keys[load_name]
+            if key is None or str(key).strip() == "":
+                raise ValueError(
+                    f"The key for '{load_name}' at tower grid point {i_grid} "
+                    "must be a non-empty string."
+                )
+            load_keys[load_name] = str(key)
+
+        if "scale_to_si" not in channel:
+            raise ValueError(
+                f"tower_fatigue_load_channels item {i_grid} is missing 'scale_to_si'. "
+                "TowerFatigue requires explicit scale-to-SI factors for Fz, Mx, and My. "
+                "For QBlade time-series saved in kN/kNm, use scale_to_si = "
+                "{'Fz': 1.0e3, 'Mx': 1.0e3, 'My': 1.0e3}. For solvers that already "
+                "save time-series in N and N*m, use scale_to_si = {'Fz': 1.0, "
+                "'Mx': 1.0, 'My': 1.0}."
+            )
+
+        raw_scales = channel["scale_to_si"]
+        if not isinstance(raw_scales, dict):
+            raise ValueError(
+                f"'scale_to_si' for tower grid point {i_grid} must be a dictionary "
+                "with keys 'Fz', 'Mx', 'My'."
+            )
+
+        load_scales = {}
+        for load_name in ("Fz", "Mx", "My"):
+            if load_name not in raw_scales:
+                raise KeyError(
+                    f"'scale_to_si' for tower grid point {i_grid} must contain '{load_name}'."
+                )
+            scale = float(raw_scales[load_name])
+            if not np.isfinite(scale) or scale <= 0.0:
+                raise ValueError(
+                    f"'scale_to_si[{load_name!r}]' for tower grid point {i_grid} "
+                    f"must be a finite positive number; got {scale!r}."
+                )
+            load_scales[load_name] = scale
+
+        tower_grid.append(twr_sec_pos)
+        load_key_map.append(load_keys)
+        load_scale_map.append(load_scales)
+
+    tower_grid = np.asarray(tower_grid, dtype=float)
+    if np.any(~np.isfinite(tower_grid)):
+        raise ValueError("tower_fatigue_load_channels contains non-finite positions.")
+
+    return tower_grid, load_key_map, load_scale_map
+
+
+def _load_case_tower_loads_on_solver_grid(ts_dir, case_file, tower_grid, load_key_map, load_scale_map):
+    """Load one case time vector and tower loads on the aeroelastic solver grid."""
+    case_path_for_suffix = Path(case_file)
+    if not case_path_for_suffix.is_absolute():
+        case_path_for_suffix = Path(ts_dir) / case_path_for_suffix
+
+    required_load_columns = list(
+        dict.fromkeys(load_keys[load_name] for load_keys in load_key_map for load_name in ("Fz", "Mx", "My"))
+    )
+
+    if case_path_for_suffix.suffix.lower() == ".parquet":
+        data = None
+        case_path = None
+        time = None
+        last_error = None
+        for time_key in ("Time", "time"):
+            required_columns = list(dict.fromkeys([time_key] + required_load_columns))
+            try:
+                data, case_path = _load_time_series_data(ts_dir, case_file, columns=required_columns)
+                time = _extract_time_series_key(data, case_path, time_key)
+                break
+            except ImportError:
+                raise
+            except Exception as err:
+                last_error = err
+        if time is None:
+            raise KeyError(
+                "Unable to load the required time and tower-load columns "
+                f"from {case_path_for_suffix}."
+            ) from last_error
+    else:
+        data, case_path = _load_time_series_data(ts_dir, case_file)
+        time = _load_time_series_key_from_candidates(data, case_path, ("Time", "time"))
+
+    time = np.asarray(time, dtype=float).squeeze()
+    if time.ndim != 1:
+        raise ValueError("Time vector must be one-dimensional.")
+    if time.size < 2:
+        raise ValueError("Time vector must contain at least two samples.")
+    if np.any(~np.isfinite(time)):
+        raise ValueError("Time vector contains non-finite values.")
+    if np.any(np.diff(time) <= 0.0):
+        raise ValueError("Time vector must be strictly increasing.")
+    if len(load_key_map) != tower_grid.size:
+        raise ValueError("load_key_map must have the same length as tower_grid.")
+    if len(load_scale_map) != tower_grid.size:
+        raise ValueError("load_scale_map must have the same length as tower_grid.")
+
+    n_grid = tower_grid.size
+    n_time = time.size
+    Fz_grid = np.empty((n_grid, n_time))
+    Mx_grid = np.empty((n_grid, n_time))
+    My_grid = np.empty((n_grid, n_time))
+
+    for i_grid, (load_keys, load_scales) in enumerate(zip(load_key_map, load_scale_map)):
+        Fz_raw = _extract_time_series_key(data, case_path, load_keys["Fz"])
+        Mx_raw = _extract_time_series_key(data, case_path, load_keys["Mx"])
+        My_raw = _extract_time_series_key(data, case_path, load_keys["My"])
+
+        for name, values in (("Fz", Fz_raw), ("Mx", Mx_raw), ("My", My_raw)):
+            if values.shape != (n_time,):
+                raise ValueError(
+                    f"{name} time series for tower grid point {i_grid} has shape "
+                    f"{values.shape}, but expected {(n_time,)}."
+                )
+
+        Fz_grid[i_grid, :] = Fz_raw * load_scales["Fz"]
+        Mx_grid[i_grid, :] = Mx_raw * load_scales["Mx"]
+        My_grid[i_grid, :] = My_raw * load_scales["My"]
+
+    return time, Fz_grid, Mx_grid, My_grid
+
+
+def _compute_tower_section_properties(z_full, outer_diameter_full, t_full):
+    """Reconstruct tower sectional properties from TowerSE/WISDEM geometry."""
+    z_full = np.asarray(z_full, dtype=float).copy()
+    outer_diameter_full = np.asarray(outer_diameter_full, dtype=float).copy()
+    t_full = np.asarray(t_full, dtype=float).copy()
+
+    n_full = z_full.size
+    n_sec = n_full - 1
+
+    if outer_diameter_full.size != n_full:
+        raise ValueError("outer_diameter_full must have the same length as z_full.")
+    if t_full.size != n_sec:
+        raise ValueError("t_full must have length n_full - 1.")
+    if np.any(~np.isfinite(z_full)):
+        raise ValueError("z_full contains non-finite values.")
+    if np.any(~np.isfinite(outer_diameter_full)):
+        raise ValueError("outer_diameter_full contains non-finite values.")
+    if np.any(~np.isfinite(t_full)):
+        raise ValueError("t_full contains non-finite values.")
+
+    section_L = np.diff(z_full)
+    if np.any(section_L <= 0.0):
+        raise ValueError("z_full must be strictly increasing from tower bottom to top.")
+    if np.any(outer_diameter_full <= 0.0):
+        raise ValueError("outer_diameter_full must be positive at all tower nodes.")
+    if np.any(t_full <= 0.0):
+        raise ValueError("t_full must be positive in all tower sections.")
+
+    section_z, _ = util.nodal2sectional(z_full)
+    section_D, _ = util.nodal2sectional(outer_diameter_full)
+    section_r_outer = 0.5 * section_D
+    section_r_inner = section_r_outer - t_full
+
+    if np.any(section_r_inner <= 0.0):
+        raise ValueError(
+            "Invalid tower geometry: each wall thickness must be smaller than "
+            "the corresponding sectional outer radius."
+        )
+
+    tube = cs.Tube(section_D, t_full, L=section_L)
+    return {
+        "section_z": section_z,
+        "section_L": section_L,
+        "section_D": section_D,
+        "section_t": t_full,
+        "section_r_outer": section_r_outer,
+        "section_r_inner": section_r_inner,
+        "section_A": tube.Area,
+        "section_Asx": tube.Asx,
+        "section_Asy": tube.Asy,
+        "section_Ixx": tube.Ixx,
+        "section_Iyy": tube.Iyy,
+        "section_J0": tube.J0,
+        "section_Sx": tube.Sx,
+        "section_Sy": tube.Sy,
+    }
+
+
+def _tower_grid_to_z(tower_grid, z_full):
+    """Convert normalized or absolute aeroelastic tower grid positions to z-coordinates."""
+    tower_grid = np.asarray(tower_grid, dtype=float).squeeze()
+    z_full = np.asarray(z_full, dtype=float).squeeze()
+
+    if tower_grid.ndim != 1:
+        raise ValueError("tower_grid must be one-dimensional.")
+    if z_full.ndim != 1:
+        raise ValueError("z_full must be one-dimensional.")
+    if np.any(~np.isfinite(tower_grid)):
+        raise ValueError("tower_grid contains non-finite values.")
+
+    tower_grid_z = z_full[0] + tower_grid * (z_full[-1] - z_full[0]) if np.all((tower_grid >= 0.0) & (tower_grid <= 1.0)) else tower_grid
+
+    if np.any(~np.isfinite(tower_grid_z)):
+        raise ValueError("tower_grid_z contains non-finite values.")
+
+    return tower_grid_z
+
+
+def _build_tower_load_interpolation_spec(tower_grid, section_z, z_full):
+    """Precompute indices and weights for tower-grid-to-section interpolation."""
+    section_z = np.asarray(section_z, dtype=float).squeeze()
+    tower_grid_z = _tower_grid_to_z(tower_grid, z_full)
+
+    if section_z.ndim != 1:
+        raise ValueError("section_z must be one-dimensional.")
+
+    sort_idx = np.argsort(tower_grid_z)
+    tower_grid_z = tower_grid_z[sort_idx]
+
+    if np.any(np.diff(tower_grid_z) <= 0.0):
+        raise ValueError(
+            "twr_sec_pos entries in tower_fatigue_load_channels must be strictly "
+            "increasing after conversion to z-coordinates."
+        )
+    if section_z[0] < tower_grid_z[0] or section_z[-1] > tower_grid_z[-1]:
+        raise ValueError(
+            "TowerSE section centers are outside the range covered by "
+            "tower_fatigue_load_channels."
+        )
+
+    idx = np.searchsorted(tower_grid_z, section_z, side="right") - 1
+    idx = np.clip(idx, 0, tower_grid_z.size - 2)
+    weight = (section_z - tower_grid_z[idx]) / (tower_grid_z[idx + 1] - tower_grid_z[idx])
+
+    return {"sort_idx": sort_idx, "idx": idx, "weight": weight, "n_grid": tower_grid_z.size}
+
+
+def _interpolate_tower_loads_to_sections_from_spec(interpolation_spec, Fz_grid, Mx_grid, My_grid):
+    """Interpolate tower loads to TowerSE section centers using a precomputed spec."""
+    interpolated_loads = []
+    sort_idx = interpolation_spec["sort_idx"]
+    idx = interpolation_spec["idx"]
+    weight = interpolation_spec["weight"]
+    n_grid = interpolation_spec["n_grid"]
+
+    for load_name, load_grid in (("Fz", Fz_grid), ("Mx", Mx_grid), ("My", My_grid)):
+        load_grid = np.asarray(load_grid, dtype=float)
+        if load_grid.ndim != 2:
+            raise ValueError(f"{load_name}_grid must be two-dimensional.")
+        if load_grid.shape[0] != n_grid:
+            raise ValueError(
+                f"{load_name}_grid first dimension must match the number of tower "
+                "load-channel stations."
+            )
+
+        load_grid = load_grid[sort_idx, :]
+        load_section = (1.0 - weight)[:, None] * load_grid[idx, :] + weight[:, None] * load_grid[idx + 1, :]
+
+        if np.any(~np.isfinite(load_section)):
+            raise ValueError(f"Interpolated {load_name} contains non-finite values.")
+
+        interpolated_loads.append(load_section)
+
+    return tuple(interpolated_loads)
+
+
+def _calculate_stress(Fz, Mx, My, A, I, R, sin_theta, cos_theta, section_fatigue_scf=1.0):
+    """Calculate one longitudinal normal-stress time series."""
+    Fz = np.asarray(Fz, dtype=float)
+    Mx = np.asarray(Mx, dtype=float)
+    My = np.asarray(My, dtype=float)
+
+    if Fz.shape != Mx.shape or Fz.shape != My.shape:
+        raise ValueError("Fz, Mx, and My must have the same shape.")
+    if Fz.ndim != 1:
+        raise ValueError("Fz, Mx, and My must be one-dimensional.")
+    if A <= 0.0:
+        raise ValueError("A must be positive.")
+    if I <= 0.0:
+        raise ValueError("I must be positive.")
+    if R <= 0.0:
+        raise ValueError("R must be positive.")
+    if section_fatigue_scf <= 0.0:
+        raise ValueError("section_fatigue_scf must be positive.")
+
+    sigma = Fz / A - Mx * R * sin_theta / I + My * R * cos_theta / I
+    sigma *= section_fatigue_scf
+
+    if np.any(~np.isfinite(sigma)):
+        raise ValueError("Calculated stress contains non-finite values.")
+
+    return sigma
+
+
+def _rainflow_ranges_counts(stress, rainflow_ranges_bins):
+    """Count rainflow stress ranges with fatpack and bin them."""
+    stress = np.asarray(stress, dtype=float).squeeze()
+
+    if stress.ndim != 1:
+        raise ValueError("Rainflow input stress must be one-dimensional.")
+    if stress.size < 2:
+        return np.zeros(0), np.zeros(0)
+    if np.any(~np.isfinite(stress)):
+        raise ValueError("Rainflow input stress contains non-finite values.")
+    if rainflow_ranges_bins <= 0:
+        raise ValueError("rainflow_ranges_bins must be positive.")
+
+    try:
+        ranges = fatpack.find_rainflow_ranges(stress)
+    except ValueError:
+        return np.zeros(0), np.zeros(0)
+
+    ranges = np.atleast_1d(np.asarray(ranges, dtype=float).squeeze())
+    if ranges.size == 0:
+        return np.zeros(0), np.zeros(0)
+
+    ranges = ranges[np.isfinite(ranges) & (ranges > 0.0)]
+    if ranges.size == 0:
+        return np.zeros(0), np.zeros(0)
+
+    counts, ranges = fatpack.find_range_count(ranges, rainflow_ranges_bins)
+    counts = np.atleast_1d(np.asarray(counts, dtype=float).squeeze())
+    ranges = np.atleast_1d(np.asarray(ranges, dtype=float).squeeze())
+    valid = np.isfinite(ranges) & np.isfinite(counts) & (ranges > 0.0) & (counts > 0.0)
+
+    return ranges[valid], counts[valid]
+
+
+def _damage_from_stress_timeseries(stress, section_t, fatigue_settings):
+    """Calculate simulated-time fatigue damage from one stress time series."""
+    stress = np.asarray(stress, dtype=float).squeeze()
+
+    if stress.ndim != 1:
+        raise ValueError("stress must be one-dimensional.")
+    if stress.size < 2:
+        return 0.0
+    if np.any(~np.isfinite(stress)):
+        raise ValueError("stress contains non-finite values.")
+
+    stress_ranges_pa, counts = _rainflow_ranges_counts(stress, fatigue_settings["rainflow_ranges_bins"])
+    if stress_ranges_pa.size == 0:
+        return 0.0
+
+    sn_k = fatigue_settings["sn_k_full"]
+    sn_tref = fatigue_settings["sn_tref_full"]
+    if sn_tref <= 0.0:
+        raise ValueError("sn_tref_full must be positive.")
+
+    t_eff = max(float(section_t), sn_tref)
+    stress_ranges_corr_mpa = stress_ranges_pa * 1.0e-6 * (t_eff / sn_tref) ** sn_k
+    valid = stress_ranges_corr_mpa > 0.0
+    if not np.any(valid):
+        return 0.0
+
+    stress_ranges_corr_mpa = stress_ranges_corr_mpa[valid]
+    counts = counts[valid]
+
+    if fatigue_settings["sn_model"] == "linear":
+        log_a = fatigue_settings["sn_log_a_full"]
+        m = fatigue_settings["sn_m_full"]
+        if m <= 0.0:
+            raise ValueError("sn_m_full must be positive.")
+        cycles_to_failure = np.power(10.0, log_a) / np.power(stress_ranges_corr_mpa, m)
+    elif fatigue_settings["sn_model"] == "bilinear":
+        log_a1 = fatigue_settings["sn_log_a1_full"]
+        m1 = fatigue_settings["sn_m1_full"]
+        log_a2 = fatigue_settings["sn_log_a2_full"]
+        m2 = fatigue_settings["sn_m2_full"]
+        transition_cycles = fatigue_settings["sn_transition_cycles_full"]
+
+        if m1 <= 0.0:
+            raise ValueError("sn_m1_full must be positive.")
+        if m2 <= 0.0:
+            raise ValueError("sn_m2_full must be positive.")
+        if transition_cycles <= 0.0:
+            raise ValueError("sn_transition_cycles_full must be positive.")
+
+        cycles_branch_1 = np.power(10.0, log_a1) / np.power(stress_ranges_corr_mpa, m1)
+        cycles_branch_2 = np.power(10.0, log_a2) / np.power(stress_ranges_corr_mpa, m2)
+        cycles_to_failure = np.where(cycles_branch_1 <= transition_cycles, cycles_branch_1, cycles_branch_2)
+    else:
+        raise ValueError(
+            f"Unsupported sn_model '{fatigue_settings['sn_model']}'. Expected 'linear' or 'bilinear'."
+        )
+
+    if np.any(cycles_to_failure <= 0.0):
+        raise ValueError("Cycles to failure must be positive.")
+
+    return float(np.sum(counts / cycles_to_failure))
+
+
+def _calculate_damage_for_case(Fz_case, Mx_case, My_case, case_probability, case_duration, section_fatigue_data, theta_stress_points, fatigue_settings):
+    """Calculate lifetime-scaled damage for one time-series case."""
+    Fz_case = np.asarray(Fz_case, dtype=float)
+    Mx_case = np.asarray(Mx_case, dtype=float)
+    My_case = np.asarray(My_case, dtype=float)
+
+    if Fz_case.shape != Mx_case.shape or Fz_case.shape != My_case.shape:
+        raise ValueError("Fz_case, Mx_case, and My_case must have the same shape.")
+    if Fz_case.ndim != 2:
+        raise ValueError("Fz_case, Mx_case, and My_case must be two-dimensional.")
+    if case_duration <= 0.0:
+        raise ValueError("case_duration must be positive.")
+    if not np.isfinite(case_probability):
+        raise ValueError("case_probability must be finite.")
+    if case_probability < 0.0:
+        raise ValueError("case_probability must be non-negative.")
+
+    n_sec, _ = Fz_case.shape
+    A = np.asarray(section_fatigue_data["A"], dtype=float)
+    I = np.asarray(section_fatigue_data["I"], dtype=float)
+    R = np.asarray(section_fatigue_data["R"], dtype=float)
+    section_t = np.asarray(section_fatigue_data["t"], dtype=float)
+
+    for name, values in (("A", A), ("I", I), ("R", R), ("t", section_t)):
+        if values.shape != (n_sec,):
+            raise ValueError(f"section_fatigue_data['{name}'] must have shape {(n_sec,)}.")
+    if np.any(A <= 0.0):
+        raise ValueError("section_A must be positive.")
+    if np.any(I <= 0.0):
+        raise ValueError("section_Ixx and section_Iyy must be positive.")
+    if np.any(R <= 0.0):
+        raise ValueError("section_r_outer must be positive.")
+    if np.any(section_t <= 0.0):
+        raise ValueError("section_t must be positive.")
+
+    section_fatigue_scf = fatigue_settings["section_fatigue_scf"]
+    if section_fatigue_scf <= 0.0:
+        raise ValueError("section_fatigue_scf must be positive.")
+
+    theta = np.asarray(theta_stress_points, dtype=float)
+    if theta.ndim != 1:
+        raise ValueError("theta_stress_points must be one-dimensional.")
+    if theta.size < 4:
+        raise ValueError("At least four theta stress points are required.")
+
+    if fatigue_settings["design_life"] <= 0.0:
+        raise ValueError("design_life must be positive.")
+
+    scale_to_life = case_probability * fatigue_settings["design_life"] / case_duration
+    damage_theta = np.zeros((n_sec, theta.size))
+    sin_theta = np.sin(theta)
+    cos_theta = np.cos(theta)
+
+    for i_sec in range(n_sec):
+        Fz = Fz_case[i_sec, :]
+        Mx = Mx_case[i_sec, :]
+        My = My_case[i_sec, :]
+
+        for i_theta in range(theta.size):
+            stress = _calculate_stress(
+                Fz=Fz,
+                Mx=Mx,
+                My=My,
+                A=A[i_sec],
+                I=I[i_sec],
+                R=R[i_sec],
+                sin_theta=sin_theta[i_theta],
+                cos_theta=cos_theta[i_theta],
+                section_fatigue_scf=section_fatigue_scf,
+            )
+            damage_theta[i_sec, i_theta] += scale_to_life * _damage_from_stress_timeseries(
+                stress=stress,
+                section_t=section_t[i_sec],
+                fatigue_settings=fatigue_settings,
+            )
+
+    return damage_theta
+
+
+def _check_continuous_fatigue_inputs(inputs, sn_model):
+    """Check shapes and values of continuous fatigue inputs once per compute call."""
+    if np.any(inputs["section_fatigue_scf"] <= 0.0):
+        raise ValueError("section_fatigue_scf must be positive.")
+    if np.any(inputs["fatigue_design_factor"] <= 0.0):
+        raise ValueError("fatigue_design_factor must be positive.")
+    if np.any(inputs["sn_tref_full"] <= 0.0):
+        raise ValueError("sn_tref_full must be positive.")
+
+    if sn_model == "linear":
+        if np.any(inputs["sn_m_full"] <= 0.0):
+            raise ValueError("sn_m_full must be positive.")
+    elif sn_model == "bilinear":
+        if np.any(inputs["sn_m1_full"] <= 0.0):
+            raise ValueError("sn_m1_full must be positive.")
+        if np.any(inputs["sn_m2_full"] <= 0.0):
+            raise ValueError("sn_m2_full must be positive.")
+        if np.any(inputs["sn_transition_cycles_full"] <= 0.0):
+            raise ValueError("sn_transition_cycles_full must be positive.")
+
+    if float(np.atleast_1d(inputs["design_life"])[0]) <= 0.0:
+        raise ValueError("design_life must be positive.")
+
+
+def _get_fatigue_settings(inputs, sn_model, rainflow_ranges_bins):
+    """Collect scalar fatigue settings into a picklable payload."""
+    return {
+        "sn_model": sn_model,
+        "rainflow_ranges_bins": int(rainflow_ranges_bins),
+        "section_fatigue_scf": float(np.atleast_1d(inputs["section_fatigue_scf"])[0]),
+        "fatigue_design_factor": float(np.atleast_1d(inputs["fatigue_design_factor"])[0]),
+        "design_life": float(np.atleast_1d(inputs["design_life"])[0]),
+        "sn_k_full": float(np.atleast_1d(inputs["sn_k_full"])[0]),
+        "sn_tref_full": float(np.atleast_1d(inputs["sn_tref_full"])[0]),
+        "sn_log_a_full": float(np.atleast_1d(inputs["sn_log_a_full"])[0]),
+        "sn_m_full": float(np.atleast_1d(inputs["sn_m_full"])[0]),
+        "sn_log_a1_full": float(np.atleast_1d(inputs["sn_log_a1_full"])[0]),
+        "sn_m1_full": float(np.atleast_1d(inputs["sn_m1_full"])[0]),
+        "sn_log_a2_full": float(np.atleast_1d(inputs["sn_log_a2_full"])[0]),
+        "sn_m2_full": float(np.atleast_1d(inputs["sn_m2_full"])[0]),
+        "sn_transition_cycles_full": float(np.atleast_1d(inputs["sn_transition_cycles_full"])[0]),
+    }
+
+
+def _get_tower_fatigue_metadata(discrete_inputs):
+    """Collect lightweight time-series metadata from discrete inputs."""
+    ts_dir = discrete_inputs["tower_fatigue_ts_dir"]
+    case_names = list(discrete_inputs["tower_fatigue_case_names"])
+    case_probability = np.asarray(discrete_inputs["tower_fatigue_case_probability"], dtype=float)
+    case_files = list(discrete_inputs["tower_fatigue_case_files"])
+    load_channels = list(discrete_inputs["tower_fatigue_load_channels"])
+
+    n_cases = len(case_names)
+    if len(case_files) != n_cases:
+        raise ValueError(
+            "tower_fatigue_case_files must have the same length as "
+            "tower_fatigue_case_names."
+        )
+    if case_probability.shape != (n_cases,):
+        raise ValueError(
+            "tower_fatigue_case_probability must have shape "
+            f"{(n_cases,)}, but received {case_probability.shape}."
+        )
+
+    tower_grid, load_key_map, load_scale_map = _parse_tower_fatigue_load_channels(load_channels)
+    return {
+        "ts_dir": ts_dir,
+        "case_names": case_names,
+        "case_probability": case_probability,
+        "case_files": case_files,
+        "tower_grid": tower_grid,
+        "load_key_map": load_key_map,
+        "load_scale_map": load_scale_map,
+    }
+
+
+def _get_section_fatigue_data(section_props):
+    """Keep only the section arrays needed by fatigue workers."""
+    return {
+        "A": np.asarray(section_props["section_A"], dtype=float),
+        "I": 0.5 * (np.asarray(section_props["section_Ixx"], dtype=float) + np.asarray(section_props["section_Iyy"], dtype=float)),
+        "R": np.asarray(section_props["section_r_outer"], dtype=float),
+        "t": np.asarray(section_props["section_t"], dtype=float),
+    }
+
+
+def _get_requested_n_workers(modeling_options, n_workers, number_of_workers=None):
+    tower_fatigue_options = modeling_options.get("TowerFatigue", {})
+    requested_n_workers = int(
+        tower_fatigue_options.get(
+            "n_workers",
+            tower_fatigue_options.get(
+                "number_of_workers",
+                n_workers if number_of_workers is None else number_of_workers,
+            ),
+        )
+    )
+    if requested_n_workers < 1:
+        raise ValueError("TowerFatigue n_workers must be at least 1.")
+    return requested_n_workers
+
+
+def _process_tower_fatigue_case(case_request, shared_payload):
+    """Load, interpolate, and fatigue-process one case in one worker process."""
+    case_index = case_request.get("case_index")
+    case_name = case_request.get("case_name")
+    case_file = case_request.get("case_file")
+
+    try:
+        case_probability = float(case_request["case_probability"])
+
+        time, Fz_grid, Mx_grid, My_grid = _load_case_tower_loads_on_solver_grid(
+            ts_dir=shared_payload["ts_dir"],
+            case_file=case_file,
+            tower_grid=shared_payload["tower_grid"],
+            load_key_map=shared_payload["load_key_map"],
+            load_scale_map=shared_payload["load_scale_map"],
+        )
+
+        case_duration = float(time[-1] - time[0])
+        if case_duration <= 0.0:
+            raise ValueError(f"Case duration must be positive for {case_file}.")
+
+        Fz_case, Mx_case, My_case = _interpolate_tower_loads_to_sections_from_spec(
+            interpolation_spec=shared_payload["interpolation_spec"],
+            Fz_grid=Fz_grid,
+            Mx_grid=Mx_grid,
+            My_grid=My_grid,
+        )
+
+        damage_theta_case = _calculate_damage_for_case(
+            Fz_case=Fz_case,
+            Mx_case=Mx_case,
+            My_case=My_case,
+            case_probability=case_probability,
+            case_duration=case_duration,
+            section_fatigue_data=shared_payload["section_fatigue_data"],
+            theta_stress_points=shared_payload["theta_stress_points"],
+            fatigue_settings=shared_payload["fatigue_settings"],
+        )
+
+        return case_index, damage_theta_case
+    except Exception as err:
+        raise RuntimeError(
+            "Failed to process tower fatigue case "
+            f"case_index={case_index}, case_name={case_name!r}, case_file={case_file!r}."
+        ) from err
+
+
+def _run_tower_fatigue_case_workers(active_case_requests, shared_payload, n_workers=None, requested_n_workers=None):
+    """Run fatigue cases serially or in a ProcessPoolExecutor."""
+    n_workers = requested_n_workers if n_workers is None else n_workers
+    if n_workers < 1:
+        raise ValueError("TowerFatigue n_workers must be at least 1.")
+
+    effective_workers = min(int(n_workers), len(active_case_requests), os.cpu_count() or 1)
+    result_by_case = {}
+
+    if effective_workers <= 1:
+        for case_request in active_case_requests:
+            case_index, damage_theta_case = _process_tower_fatigue_case(case_request, shared_payload)
+            result_by_case[case_index] = damage_theta_case
+        return result_by_case, effective_workers
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=effective_workers) as executor:
+        futures = [
+            executor.submit(_process_tower_fatigue_case, case_request, shared_payload)
+            for case_request in active_case_requests
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            case_index, damage_theta_case = future.result()
+            result_by_case[case_index] = damage_theta_case
+
+    return result_by_case, effective_workers
+
+
+def _smoke_test_scale_to_si():
+    """Quick check that tower-load scale_to_si metadata is applied."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        case_file = "scale_to_si_case.p"
+        pd.DataFrame(
+            {
+                "Time": np.array([0.0, 1.0, 2.0]),
+                "Fz0": np.array([1.0, 2.0, 3.0]),
+                "Mx0": np.array([4.0, 5.0, 6.0]),
+                "My0": np.array([7.0, 8.0, 9.0]),
+                "Fz1": np.array([2.0, 3.0, 4.0]),
+                "Mx1": np.array([5.0, 6.0, 7.0]),
+                "My1": np.array([8.0, 9.0, 10.0]),
+            }
+        ).to_pickle(Path(tmpdir) / case_file)
+        _time, Fz_grid, Mx_grid, My_grid = _load_case_tower_loads_on_solver_grid(
+            ts_dir=tmpdir,
+            case_file=case_file,
+            tower_grid=np.array([0.0, 1.0]),
+            load_key_map=[
+                {"Fz": "Fz0", "Mx": "Mx0", "My": "My0"},
+                {"Fz": "Fz1", "Mx": "Mx1", "My": "My1"},
+            ],
+            load_scale_map=[
+                {"Fz": 1.0e3, "Mx": 1.0e3, "My": 1.0e3},
+                {"Fz": 1.0e3, "Mx": 1.0e3, "My": 1.0e3},
+            ],
+        )
+
+    if not (
+        np.allclose(Fz_grid[0, :], np.array([1.0, 2.0, 3.0]) * 1.0e3)
+        and np.allclose(Mx_grid[1, :], np.array([5.0, 6.0, 7.0]) * 1.0e3)
+        and np.allclose(My_grid[1, :], np.array([8.0, 9.0, 10.0]) * 1.0e3)
+    ):
+        raise AssertionError("scale_to_si was not applied to tower loads.")
 
 
 class TowerFatiguePostFrame(om.ExplicitComponent):
@@ -168,6 +968,19 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
     def initialize(self):
         self.options.declare("modeling_options", default={}, types=dict)
         self.options.declare("n_full", types=int)
+        self.options.declare(
+            "n_workers",
+            default=1,
+            types=int,
+            desc="Number of case-level worker processes used for tower fatigue.",
+        )
+        self.options.declare(
+            "number_of_workers",
+            default=None,
+            allow_none=True,
+            types=(int, type(None)),
+            desc="Deprecated alias for n_workers.",
+        )
         self.options.declare(
             "n_theta",
             default=36,
@@ -288,1152 +1101,15 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         # initial choice.
         self.declare_partials("*", "*", method="fd")
 
-    def _load_time_series_data(self, ts_dir, case_file, columns=None):
-        """
-        Load one saved time-series file.
-
-        Supported file formats are .p, .pkl, .pickle, .parquet, .csv, and .npz.
-        """
-        case_path = Path(case_file)
-
-        if not case_path.is_absolute():
-            case_path = Path(ts_dir) / case_path
-
-        if not case_path.exists():
-            raise FileNotFoundError(f"Time-series file not found: {case_path}")
-
-        suffix = case_path.suffix.lower()
-
-        if suffix in (".p", ".pkl", ".pickle"):
-            data = pd.read_pickle(case_path)
-
-        elif suffix == ".parquet":
-            data = pd.read_parquet(case_path, columns=columns)
-
-        elif suffix == ".csv":
-            data = pd.read_csv(case_path)
-
-        elif suffix == ".npz":
-            with np.load(case_path, allow_pickle=False) as npz_data:
-                data = {key: np.asarray(npz_data[key]) for key in npz_data.files}
-
-        else:
-            raise ValueError(
-                f"Unsupported time-series file format '{suffix}'. "
-                "Supported formats are .p, .pkl, .pickle, .parquet, .csv, and .npz."
-            )
-
-        return data, case_path
-
-    def _extract_time_series_key(self, data, case_path, key):
-        """
-        Extract one key from an already loaded time-series object.
-        """
-        if key is None or str(key).strip() == "":
-            raise ValueError("key must be a non-empty string.")
-
-        if isinstance(data, pd.DataFrame):
-            available_keys = list(data.columns)
-
-            if key not in available_keys:
-                raise KeyError(
-                    f"Key '{key}' not found in {case_path}. "
-                    f"Available columns are: {available_keys}"
-                )
-
-            values = data[key].to_numpy(dtype=float)
-
-        elif isinstance(data, dict):
-            available_keys = list(data.keys())
-
-            if key not in available_keys:
-                raise KeyError(
-                    f"Key '{key}' not found in {case_path}. "
-                    f"Available keys are: {available_keys}"
-                )
-
-            values = np.asarray(data[key], dtype=float)
-
-        else:
-            raise TypeError(
-                f"Unsupported object loaded from {case_path}. "
-                "Expected a pandas DataFrame or a dictionary-like object."
-            )
-
-        values = np.asarray(values, dtype=float).squeeze()
-
-        if values.ndim != 1:
-            raise ValueError(
-                f"Key '{key}' in {case_path} must be one-dimensional after "
-                f"squeeze, but has shape {values.shape}."
-            )
-
-        if np.any(~np.isfinite(values)):
-            raise ValueError(
-                f"Key '{key}' in {case_path} contains non-finite values."
-            )
-
-        return values
-
-    def _load_time_series_key_from_candidates(self, data, case_path, keys):
-        """
-        Load the first available key from a list of candidate key names.
-
-        This helper is used only for the time vector, where both ``Time`` and
-        ``time`` are accepted. Tower load keys are not guessed: they are read
-        exactly from ``tower_fatigue_load_channels``.
-        """
-        last_error = None
-
-        for key in keys:
-            try:
-                return self._extract_time_series_key(data, case_path, key)
-            except KeyError as err:
-                last_error = err
-
-        raise KeyError(
-            f"None of the candidate keys {keys} was found in {case_path}."
-        ) from last_error
-
-    def _parse_tower_fatigue_load_channels(self, tower_fatigue_load_channels):
-        """
-        Parse and validate tower load-channel metadata.
-
-        Parameters
-        ----------
-        tower_fatigue_load_channels : list of dict
-            List of tower load-channel metadata. Each item must have the form:
-
-                {
-                    "twr_sec_pos": float,
-                    "keys": {
-                        "Fz": str,
-                        "Mx": str,
-                        "My": str,
-                    },
-                    "scale_to_si": {          # required; see unit note below
-                        "Fz": float,          # multiply raw Fz to get N
-                        "Mx": float,          # multiply raw Mx to get N*m
-                        "My": float,          # multiply raw My to get N*m
-                    },
-                    "units": {                # optional, informational only
-                        "Fz": str,
-                        "Mx": str,
-                        "My": str,
-                    },
-                }
-
-            ``scale_to_si`` converts raw .p file values to SI (N / N*m).
-            QBlade saves loads in kN and kNm, so ``scale_to_si = 1e3`` for all
-            components.  A future OpenFAST builder should use ``scale_to_si = 1.0``
-            if .p files already contain N / N*m.
-
-            If ``scale_to_si`` is absent, the parser raises an error. Explicit
-            unit conversion factors are required to avoid silently mixing kN/kNm
-            and SI loads.
-
-        Returns
-        -------
-        tower_grid : numpy.ndarray[n_grid]
-            Tower grid positions from ``twr_sec_pos``.
-
-        load_key_map : list of dict
-            Exact column names to read for each tower grid point.
-
-        load_scale_map : list of dict
-            Scale factors to convert raw .p values to SI for each grid point.
-            Each entry has keys ``"Fz"``, ``"Mx"``, ``"My"`` as floats.
-        """
-        if not isinstance(tower_fatigue_load_channels, (list, tuple)):
-            raise ValueError(
-                "tower_fatigue_load_channels must be a list or tuple of dictionaries."
-            )
-
-        if len(tower_fatigue_load_channels) < 2:
-            raise ValueError(
-                "tower_fatigue_load_channels must contain at least two tower "
-                "grid points for interpolation."
-            )
-
-        tower_grid = []
-        load_key_map = []
-        load_scale_map = []
-
-        for i_grid, channel in enumerate(tower_fatigue_load_channels):
-            if not isinstance(channel, dict):
-                raise ValueError(
-                    "Each item in tower_fatigue_load_channels must be a dictionary. "
-                    f"Item {i_grid} has type {type(channel)}."
-                )
-
-            if "twr_sec_pos" not in channel:
-                raise KeyError(
-                    f"Item {i_grid} in tower_fatigue_load_channels is missing "
-                    "the 'twr_sec_pos' field."
-                )
-
-            if "keys" not in channel:
-                raise KeyError(
-                    f"Item {i_grid} in tower_fatigue_load_channels is missing "
-                    "the 'keys' field."
-                )
-
-            twr_sec_pos = float(channel["twr_sec_pos"])
-
-            if not np.isfinite(twr_sec_pos):
-                raise ValueError(
-                    f"'twr_sec_pos' for tower grid point {i_grid} must be finite."
-                )
-
-            keys = channel["keys"]
-
-            if not isinstance(keys, dict):
-                raise ValueError(
-                    f"'keys' for tower grid point {i_grid} must be a dictionary."
-                )
-
-            load_keys = {}
-
-            for load_name in ("Fz", "Mx", "My"):
-                if load_name not in keys:
-                    raise KeyError(
-                        f"'keys' for tower grid point {i_grid} must contain "
-                        f"'{load_name}'."
-                    )
-
-                key = keys[load_name]
-
-                if key is None or str(key).strip() == "":
-                    raise ValueError(
-                        f"The key for '{load_name}' at tower grid point "
-                        f"{i_grid} must be a non-empty string."
-                    )
-
-                load_keys[load_name] = str(key)
-
-            # ------------------------------------------------------------------
-            # scale_to_si: convert raw .p values to SI (N and N*m).
-            # Required — raises ValueError if absent. Explicit factors are
-            # mandatory because silently assuming SI when loads are in kN/kNm
-            # would underestimate fatigue damage by 10^9 to 10^15.
-            # ------------------------------------------------------------------
-            if "scale_to_si" in channel:
-                raw_scales = channel["scale_to_si"]
-                if not isinstance(raw_scales, dict):
-                    raise ValueError(
-                        f"'scale_to_si' for tower grid point {i_grid} must be "
-                        "a dictionary with keys 'Fz', 'Mx', 'My'."
-                    )
-                load_scales = {}
-                for load_name in ("Fz", "Mx", "My"):
-                    if load_name not in raw_scales:
-                        raise KeyError(
-                            f"'scale_to_si' for tower grid point {i_grid} must "
-                            f"contain '{load_name}'."
-                        )
-                    scale = float(raw_scales[load_name])
-                    if not np.isfinite(scale) or scale <= 0.0:
-                        raise ValueError(
-                            f"'scale_to_si[{load_name!r}]' for tower grid point "
-                            f"{i_grid} must be a finite positive number; "
-                            f"got {scale!r}."
-                        )
-                    load_scales[load_name] = scale
-            else:
-                raise ValueError(
-                    f"tower_fatigue_load_channels item {i_grid} is missing "
-                    "'scale_to_si'. TowerFatigue requires explicit scale-to-SI "
-                    "factors for Fz, Mx, and My. For QBlade time-series saved "
-                    "in kN/kNm, use scale_to_si = {'Fz': 1.0e3, 'Mx': 1.0e3, "
-                    "'My': 1.0e3}. For solvers that already save time-series in "
-                    "N and N*m, use scale_to_si = {'Fz': 1.0, 'Mx': 1.0, "
-                    "'My': 1.0}."
-                )
-
-            tower_grid.append(twr_sec_pos)
-            load_key_map.append(load_keys)
-            load_scale_map.append(load_scales)
-
-        tower_grid = np.asarray(tower_grid, dtype=float)
-
-        if np.any(~np.isfinite(tower_grid)):
-            raise ValueError("tower_fatigue_load_channels contains non-finite positions.")
-
-        return tower_grid, load_key_map, load_scale_map
-
-    def _load_case_tower_loads_on_solver_grid(
-        self,
-        ts_dir,
-        case_file,
-        tower_grid,
-        load_key_map,
-        load_scale_map,
-    ):
-        """
-        Load one case time vector and tower loads on the aeroelastic solver grid.
-
-        Raw load values are read from the .p file and immediately converted to
-        SI units using ``load_scale_map``.  All downstream code (stress
-        reconstruction, S-N evaluation) therefore always receives:
-
-            Fz in N
-            Mx in N*m
-            My in N*m
-
-        The loads are not assumed to be interpolated onto TowerSE sections.
-        Interpolation is performed later inside the fatigue component.
-
-        The time vector is read directly from the time-series file using either
-        the key ``Time`` or the key ``time``. Tower load channels are not
-        guessed. They are read only from the already validated ``load_key_map``
-        produced from ``tower_fatigue_load_channels``.
-
-        Parameters
-        ----------
-        ts_dir : str or pathlib.Path
-            Time-series directory.
-
-        case_file : str or pathlib.Path
-            File name or full path of the selected case.
-
-        tower_grid : numpy array[n_grid], [-] or [m]
-            Aeroelastic tower-grid positions obtained from the
-            ``twr_sec_pos`` entries of ``tower_fatigue_load_channels``.
-
-        load_key_map : list of dict
-            Validated tower load-channel keys. Each item must contain the exact
-            column names to read for ``Fz``, ``Mx``, and ``My``.
-
-        load_scale_map : list of dict
-            Scale factors to convert raw .p values to SI for each grid point.
-            Each entry must contain ``"Fz"``, ``"Mx"``, ``"My"`` as positive
-            floats.  Examples:
-              - QBlade .p files store kN/kNm  → scale = 1e3
-              - OpenFAST .p files store N/N*m  → scale = 1.0
-
-        Returns
-        -------
-        time : numpy array[n_time], [s]
-            Time vector.
-
-        Fz_grid : numpy array[n_grid, n_time], [N]
-            Axial force time series on the aeroelastic solver grid (SI).
-
-        Mx_grid : numpy array[n_grid, n_time], [N*m]
-            Bending moment about local x axis on the aeroelastic solver grid (SI).
-
-        My_grid : numpy array[n_grid, n_time], [N*m]
-            Bending moment about local y axis on the aeroelastic solver grid (SI).
-        """
-        case_path_for_suffix = Path(case_file)
-
-        if not case_path_for_suffix.is_absolute():
-            case_path_for_suffix = Path(ts_dir) / case_path_for_suffix
-
-        required_load_columns = []
-
-        for load_keys in load_key_map:
-            for load_name in ("Fz", "Mx", "My"):
-                required_load_columns.append(load_keys[load_name])
-
-        required_load_columns = list(dict.fromkeys(required_load_columns))
-
-        if case_path_for_suffix.suffix.lower() == ".parquet":
-            data = None
-            case_path = None
-            time = None
-            last_error = None
-
-            for time_key in ("Time", "time"):
-                required_columns = list(dict.fromkeys([time_key] + required_load_columns))
-
-                try:
-                    data, case_path = self._load_time_series_data(
-                        ts_dir,
-                        case_file,
-                        columns=required_columns,
-                    )
-                    time = self._extract_time_series_key(data, case_path, time_key)
-                    break
-                except ImportError:
-                    raise
-                except Exception as err:
-                    last_error = err
-
-            if time is None:
-                raise KeyError(
-                    f"Unable to load the required time and tower-load columns "
-                    f"from {case_path_for_suffix}."
-                ) from last_error
-
-        else:
-            data, case_path = self._load_time_series_data(ts_dir, case_file)
-
-            time = self._load_time_series_key_from_candidates(
-                data=data,
-                case_path=case_path,
-                keys=("Time", "time"),
-            )
-
-        time = np.asarray(time, dtype=float).squeeze()
-
-        if time.ndim != 1:
-            raise ValueError("Time vector must be one-dimensional.")
-
-        if time.size < 2:
-            raise ValueError("Time vector must contain at least two samples.")
-
-        if np.any(~np.isfinite(time)):
-            raise ValueError("Time vector contains non-finite values.")
-
-        if np.any(np.diff(time) <= 0.0):
-            raise ValueError("Time vector must be strictly increasing.")
-
-        # Defensive: all three maps are built from the same list in
-        # _parse_tower_fatigue_load_channels.
-        if len(load_key_map) != tower_grid.size:
-            raise ValueError(
-                "load_key_map must have the same length as tower_grid."
-            )
-
-        if len(load_scale_map) != tower_grid.size:
-            raise ValueError(
-                "load_scale_map must have the same length as tower_grid."
-            )
-
-        n_grid = tower_grid.size
-        n_time = time.size
-
-        Fz_grid = np.empty((n_grid, n_time))
-        Mx_grid = np.empty((n_grid, n_time))
-        My_grid = np.empty((n_grid, n_time))
-
-        for i_grid, (load_keys, load_scales) in enumerate(
-            zip(load_key_map, load_scale_map)
-        ):
-            Fz_raw = self._extract_time_series_key(
-                data=data,
-                case_path=case_path,
-                key=load_keys["Fz"],
-            )
-            Mx_raw = self._extract_time_series_key(
-                data=data,
-                case_path=case_path,
-                key=load_keys["Mx"],
-            )
-            My_raw = self._extract_time_series_key(
-                data=data,
-                case_path=case_path,
-                key=load_keys["My"],
-            )
-
-            for name, values in (("Fz", Fz_raw), ("Mx", Mx_raw), ("My", My_raw)):
-                if values.shape != (n_time,):
-                    raise ValueError(
-                        f"{name} time series for tower grid point {i_grid} "
-                        f"has shape {values.shape}, but expected {(n_time,)}."
-                    )
-
-            # Convert raw file units to SI (N and N*m) using the per-grid-point
-            # scale factors provided by the upstream metadata builder.
-            Fz_grid[i_grid, :] = Fz_raw * load_scales["Fz"]
-            Mx_grid[i_grid, :] = Mx_raw * load_scales["Mx"]
-            My_grid[i_grid, :] = My_raw * load_scales["My"]
-
-        return time, Fz_grid, Mx_grid, My_grid
-
-    def _compute_tower_section_properties(self, z_full, outer_diameter_full, t_full):
-        """
-        Reconstruct tower sectional properties from TowerSE/WISDEM geometry.
-        """
-        z_full = np.asarray(z_full, dtype=float).copy()
-        outer_diameter_full = np.asarray(outer_diameter_full, dtype=float).copy()
-        t_full = np.asarray(t_full, dtype=float).copy()
-
-        n_full = z_full.size
-        n_sec = n_full - 1
-
-        if outer_diameter_full.size != n_full:
-            raise ValueError(
-                "outer_diameter_full must have the same length as z_full."
-            )
-
-        if t_full.size != n_sec:
-            raise ValueError("t_full must have length n_full - 1.")
-
-        if np.any(~np.isfinite(z_full)):
-            raise ValueError("z_full contains non-finite values.")
-
-        if np.any(~np.isfinite(outer_diameter_full)):
-            raise ValueError("outer_diameter_full contains non-finite values.")
-
-        if np.any(~np.isfinite(t_full)):
-            raise ValueError("t_full contains non-finite values.")
-
-        section_L = np.diff(z_full)
-
-        if np.any(section_L <= 0.0):
-            raise ValueError(
-                "z_full must be strictly increasing from tower bottom to top."
-            )
-
-        if np.any(outer_diameter_full <= 0.0):
-            raise ValueError(
-                "outer_diameter_full must be positive at all tower nodes."
-            )
-
-        if np.any(t_full <= 0.0):
-            raise ValueError("t_full must be positive in all tower sections.")
-
-        section_z, _ = util.nodal2sectional(z_full)
-        section_D, _ = util.nodal2sectional(outer_diameter_full)
-
-        section_r_outer = 0.5 * section_D
-        section_r_inner = section_r_outer - t_full
-
-        if np.any(section_r_inner <= 0.0):
-            raise ValueError(
-                "Invalid tower geometry: each wall thickness must be smaller "
-                "than the corresponding sectional outer radius."
-            )
-
-        tube = cs.Tube(section_D, t_full, L=section_L)
-
-        section_props = {
-            "section_z": section_z,
-            "section_L": section_L,
-            "section_D": section_D,
-            "section_t": t_full,
-            "section_r_outer": section_r_outer,
-            "section_r_inner": section_r_inner,
-            "section_A": tube.Area,
-            "section_Asx": tube.Asx,
-            "section_Asy": tube.Asy,
-            "section_Ixx": tube.Ixx,
-            "section_Iyy": tube.Iyy,
-            "section_J0": tube.J0,
-            "section_Sx": tube.Sx,
-            "section_Sy": tube.Sy,
-        }
-
-        return section_props
-
-    def _tower_grid_to_z(self, tower_grid, z_full):
-        """
-        Convert the aeroelastic tower grid to absolute z-coordinates.
-
-        If all entries of ``tower_grid`` are between 0 and 1, they are
-        interpreted as normalized tower positions. Otherwise, they are
-        interpreted as absolute z-coordinates in meters.
-        """
-        tower_grid = np.asarray(tower_grid, dtype=float).squeeze()
-        z_full = np.asarray(z_full, dtype=float).squeeze()
-
-        if tower_grid.ndim != 1:
-            raise ValueError("tower_grid must be one-dimensional.")
-
-        if z_full.ndim != 1:
-            raise ValueError("z_full must be one-dimensional.")
-
-        if np.any(~np.isfinite(tower_grid)):
-            raise ValueError("tower_grid contains non-finite values.")
-
-        if np.all(tower_grid >= 0.0) and np.all(tower_grid <= 1.0):
-            tower_grid_z = z_full[0] + tower_grid * (z_full[-1] - z_full[0])
-        else:
-            tower_grid_z = tower_grid
-
-        if np.any(~np.isfinite(tower_grid_z)):
-            raise ValueError("tower_grid_z contains non-finite values.")
-
-        return tower_grid_z
-
-    def _interpolate_tower_loads_to_sections(
-        self,
-        tower_grid,
-        Fz_grid,
-        Mx_grid,
-        My_grid,
-        section_z,
-        z_full,
-    ):
-        """
-        Interpolate tower loads from the aeroelastic grid to TowerSE sections.
-
-        Parameters
-        ----------
-        tower_grid : numpy array[n_grid], [-] or [m]
-            Aeroelastic tower grid positions.
-
-        Fz_grid, Mx_grid, My_grid : numpy array[n_grid, n_time]
-            Load time series on the aeroelastic tower grid.
-
-        section_z : numpy array[n_sec], [m]
-            TowerSE section-center z-coordinates.
-
-        z_full : numpy array[n_full], [m]
-            Tower nodal z-coordinates.
-
-        Returns
-        -------
-        Fz_case, Mx_case, My_case : numpy array[n_sec, n_time]
-            Load time series interpolated onto TowerSE section centers.
-        """
-        section_z = np.asarray(section_z, dtype=float).squeeze()
-        tower_grid_z = self._tower_grid_to_z(tower_grid, z_full)
-
-        if section_z.ndim != 1:
-            raise ValueError("section_z must be one-dimensional.")
-
-        sort_idx = np.argsort(tower_grid_z)
-        tower_grid_z = tower_grid_z[sort_idx]
-
-        if np.any(np.diff(tower_grid_z) <= 0.0):
-            raise ValueError(
-                "twr_sec_pos entries in tower_fatigue_load_channels must be "
-                "strictly increasing after conversion to z-coordinates."
-            )
-
-        if section_z[0] < tower_grid_z[0] or section_z[-1] > tower_grid_z[-1]:
-            raise ValueError(
-                "TowerSE section centers are outside the range covered by "
-                "tower_fatigue_load_channels."
-            )
-
-        idx = np.searchsorted(tower_grid_z, section_z, side="right") - 1
-        idx = np.clip(idx, 0, tower_grid_z.size - 2)
-
-        z0 = tower_grid_z[idx]
-        z1 = tower_grid_z[idx + 1]
-        weight = (section_z - z0) / (z1 - z0)
-
-        interpolated_loads = []
-
-        for load_name, load_grid in (
-            ("Fz", Fz_grid),
-            ("Mx", Mx_grid),
-            ("My", My_grid),
-        ):
-            load_grid = np.asarray(load_grid, dtype=float)
-
-            if load_grid.ndim != 2:
-                raise ValueError(f"{load_name}_grid must be two-dimensional.")
-
-            if load_grid.shape[0] != tower_grid_z.size:
-                raise ValueError(
-                    f"{load_name}_grid first dimension must match the number "
-                    "of tower load-channel stations."
-                )
-
-            load_grid = load_grid[sort_idx, :]
-
-            load_section = (
-                (1.0 - weight)[:, None] * load_grid[idx, :]
-                + weight[:, None] * load_grid[idx + 1, :]
-            )
-
-            if np.any(~np.isfinite(load_section)):
-                raise ValueError(
-                    f"Interpolated {load_name} contains non-finite values."
-                )
-
-            interpolated_loads.append(load_section)
-
-        return tuple(interpolated_loads)
-
-    def calculate_stress(
-        self,
-        Fz,
-        Mx,
-        My,
-        A,
-        I,
-        R,
-        sin_theta,
-        cos_theta,
-        section_fatigue_scf=1.0,
-    ):
-        """
-        Calculate one stress time series.
-
-        This function implements the requested stress equation:
-
-            sigma = Fz / A - Mx * R * sin(theta) / I
-                         + My * R * cos(theta) / I
-
-        Parameters
-        ----------
-        Fz : numpy array[n_time], [N]
-            Axial force time series.
-
-        Mx : numpy array[n_time], [N*m]
-            Bending moment about local x axis.
-
-        My : numpy array[n_time], [N*m]
-            Bending moment about local y axis.
-
-        A : float, [m**2]
-            Cross-sectional area.
-
-        I : float, [m**4]
-            Second moment of area.
-
-        R : float, [m]
-            Outer radius.
-
-        sin_theta, cos_theta : float
-            Sine and cosine of the circumferential stress point.
-
-        section_fatigue_scf : float, optional
-            Stress concentration factor applied to the stress time series.
-
-        Returns
-        -------
-        sigma : numpy array[n_time], [Pa]
-            Normal stress time series.
-        """
-        Fz = np.asarray(Fz, dtype=float)
-        Mx = np.asarray(Mx, dtype=float)
-        My = np.asarray(My, dtype=float)
-
-        if Fz.shape != Mx.shape or Fz.shape != My.shape:
-            raise ValueError("Fz, Mx, and My must have the same shape.")
-
-        if Fz.ndim != 1:
-            raise ValueError("Fz, Mx, and My must be one-dimensional.")
-
-        if A <= 0.0:
-            raise ValueError("A must be positive.")
-
-        if I <= 0.0:
-            raise ValueError("I must be positive.")
-
-        if R <= 0.0:
-            raise ValueError("R must be positive.")
-
-        if section_fatigue_scf <= 0.0:
-            raise ValueError("section_fatigue_scf must be positive.")
-
-        sigma = (
-            Fz / A
-            - Mx * R * sin_theta / I
-            + My * R * cos_theta / I
-        )
-
-        sigma *= section_fatigue_scf
-
-        if np.any(~np.isfinite(sigma)):
-            raise ValueError("Calculated stress contains non-finite values.")
-
-        return sigma
-
-    def _rainflow_ranges_counts(self, stress):
-        """
-        Count rainflow stress ranges using fatpack, following the same
-        high-level rainflow binning interface used by NREL pCrunch.
-
-        pCrunch calls ``fatpack.find_rainflow_ranges`` directly on the channel
-        time series, then bins those ranges with ``fatpack.find_range_count``.
-        Here the same approach is used on the reconstructed stress time series.
-        The binned ranges and counts are passed to the existing S-N / Miner
-        damage calculation without changing the downstream fatigue physics.
-
-        Returns
-        -------
-        ranges : numpy array, [Pa]
-            Rainflow stress ranges.
-
-        counts : numpy array, [-]
-            Cycle counts associated with each returned range.
-        """
-        stress = np.asarray(stress, dtype=float).squeeze()
-
-        if stress.ndim != 1:
-            raise ValueError("Rainflow input stress must be one-dimensional.")
-
-        if stress.size < 2:
-            return np.zeros(0), np.zeros(0)
-
-        if np.any(~np.isfinite(stress)):
-            raise ValueError("Rainflow input stress contains non-finite values.")
-
-        rainflow_ranges_bins = self.options["rainflow_ranges_bins"]
-
-        if rainflow_ranges_bins <= 0:
-            raise ValueError("rainflow_ranges_bins must be positive.")
-
-        try:
-            ranges = fatpack.find_rainflow_ranges(stress)
-        except ValueError:
-            return np.zeros(0), np.zeros(0)
-
-        ranges = np.atleast_1d(np.asarray(ranges, dtype=float).squeeze())
-
-        if ranges.size == 0:
-            return np.zeros(0), np.zeros(0)
-
-        valid = np.isfinite(ranges) & (ranges > 0.0)
-        ranges = ranges[valid]
-
-        if ranges.size == 0:
-            return np.zeros(0), np.zeros(0)
-
-        counts, ranges = fatpack.find_range_count(ranges, rainflow_ranges_bins)
-        counts = np.atleast_1d(np.asarray(counts, dtype=float).squeeze())
-        ranges = np.atleast_1d(np.asarray(ranges, dtype=float).squeeze())
-
-        valid = (
-            np.isfinite(ranges)
-            & np.isfinite(counts)
-            & (ranges > 0.0)
-            & (counts > 0.0)
-        )
-        ranges = ranges[valid]
-        counts = counts[valid]
-
-        if ranges.size == 0:
-            return np.zeros(0), np.zeros(0)
-
-        return ranges, counts
-
-    def damage_from_stress_timeseries(self, stress, section_t, inputs):
-        """
-        Calculate fatigue damage from one stress time series.
-
-        The input stress is one-dimensional and corresponds to one tower
-        section and one circumferential angle.
-
-        The returned damage is the simulated-time damage before lifetime
-        scaling.
-        """
-        stress = np.asarray(stress, dtype=float).squeeze()
-
-        if stress.ndim != 1:
-            raise ValueError("stress must be one-dimensional.")
-
-        if stress.size < 2:
-            return 0.0
-
-        if np.any(~np.isfinite(stress)):
-            raise ValueError("stress contains non-finite values.")
-
-        stress_ranges_pa, counts = self._rainflow_ranges_counts(stress)
-
-        if stress_ranges_pa.size == 0:
-            return 0.0
-
-        sn_k = float(inputs["sn_k_full"])
-        sn_tref = float(inputs["sn_tref_full"])
-
-        if sn_tref <= 0.0:
-            raise ValueError("sn_tref_full must be positive.")
-
-        t_eff = max(float(section_t), sn_tref)
-
-        stress_ranges_mpa = stress_ranges_pa * 1.0e-6
-        stress_ranges_corr_mpa = (
-            stress_ranges_mpa * (t_eff / sn_tref) ** sn_k
-        )
-
-        valid = stress_ranges_corr_mpa > 0.0
-
-        if not np.any(valid):
-            return 0.0
-
-        stress_ranges_corr_mpa = stress_ranges_corr_mpa[valid]
-        counts = counts[valid]
-
-        sn_model = self.options["sn_model"]
-
-        if sn_model == "linear":
-            log_a = float(inputs["sn_log_a_full"])
-            m = float(inputs["sn_m_full"])
-
-            if m <= 0.0:
-                raise ValueError("sn_m_full must be positive.")
-
-            cycles_to_failure = (
-                np.power(10.0, log_a)
-                / np.power(stress_ranges_corr_mpa, m)
-            )
-
-        elif sn_model == "bilinear":
-            log_a1 = float(inputs["sn_log_a1_full"])
-            m1 = float(inputs["sn_m1_full"])
-            log_a2 = float(inputs["sn_log_a2_full"])
-            m2 = float(inputs["sn_m2_full"])
-            transition_cycles = float(inputs["sn_transition_cycles_full"])
-
-            if m1 <= 0.0:
-                raise ValueError("sn_m1_full must be positive.")
-
-            if m2 <= 0.0:
-                raise ValueError("sn_m2_full must be positive.")
-
-            if transition_cycles <= 0.0:
-                raise ValueError("sn_transition_cycles_full must be positive.")
-
-            cycles_branch_1 = (
-                np.power(10.0, log_a1)
-                / np.power(stress_ranges_corr_mpa, m1)
-            )
-
-            cycles_branch_2 = (
-                np.power(10.0, log_a2)
-                / np.power(stress_ranges_corr_mpa, m2)
-            )
-
-            use_branch_1 = cycles_branch_1 <= transition_cycles
-            cycles_to_failure = np.where(
-                use_branch_1,
-                cycles_branch_1,
-                cycles_branch_2,
-            )
-
-        else:
-            raise ValueError(
-                f"Unsupported sn_model '{sn_model}'. "
-                "Expected 'linear' or 'bilinear'."
-            )
-
-        if np.any(cycles_to_failure <= 0.0):
-            raise ValueError("Cycles to failure must be positive.")
-
-        damage = np.sum(counts / cycles_to_failure)
-
-        return float(damage)
-
-    def calculate_damage_for_case(
-        self,
-        Fz_case,
-        Mx_case,
-        My_case,
-        case_probability,
-        case_duration,
-        section_props,
-        theta_stress_points,
-        inputs,
-    ):
-        """
-        Calculate lifetime-scaled damage for one time-series case.
-
-        Parameters
-        ----------
-        Fz_case, Mx_case, My_case : numpy array[n_sec, n_time]
-            Tower load time series interpolated onto TowerSE section centers.
-
-        case_probability : float
-            Probability associated with the time-series case. This value is
-            used as provided and is not normalized.
-
-        case_duration : float, [s]
-            Duration of the simulated time series.
-
-        section_props : dict
-            Tower section properties.
-
-        theta_stress_points : numpy array[n_theta], [rad]
-            Circumferential stress-evaluation angles.
-
-        inputs : OpenMDAO inputs
-            Component continuous inputs containing S-N parameters.
-
-        Returns
-        -------
-        damage_theta : numpy array[n_sec, n_theta], [-]
-            Lifetime-scaled damage contribution for each section and angular
-            point.
-        """
-        Fz_case = np.asarray(Fz_case, dtype=float)
-        Mx_case = np.asarray(Mx_case, dtype=float)
-        My_case = np.asarray(My_case, dtype=float)
-
-        if Fz_case.shape != Mx_case.shape or Fz_case.shape != My_case.shape:
-            raise ValueError("Fz_case, Mx_case, and My_case must have the same shape.")
-
-        if Fz_case.ndim != 2:
-            raise ValueError("Fz_case, Mx_case, and My_case must be two-dimensional.")
-
-        if case_duration <= 0.0:
-            raise ValueError("case_duration must be positive.")
-
-        if not np.isfinite(case_probability):
-            raise ValueError("case_probability must be finite.")
-
-        if case_probability < 0.0:
-            raise ValueError("case_probability must be non-negative.")
-
-        n_sec, _ = Fz_case.shape
-
-        A = np.asarray(section_props["section_A"], dtype=float)
-        Ixx = np.asarray(section_props["section_Ixx"], dtype=float)
-        Iyy = np.asarray(section_props["section_Iyy"], dtype=float)
-        R = np.asarray(section_props["section_r_outer"], dtype=float)
-        section_t = np.asarray(section_props["section_t"], dtype=float)
-
-        for name, values in (
-            ("section_A", A),
-            ("section_Ixx", Ixx),
-            ("section_Iyy", Iyy),
-            ("section_r_outer", R),
-            ("section_t", section_t),
-        ):
-            if values.shape != (n_sec,):
-                raise ValueError(f"{name} must have shape {(n_sec,)}.")
-
-        if np.any(A <= 0.0):
-            raise ValueError("section_A must be positive.")
-
-        if np.any(Ixx <= 0.0) or np.any(Iyy <= 0.0):
-            raise ValueError("section_Ixx and section_Iyy must be positive.")
-
-        if np.any(R <= 0.0):
-            raise ValueError("section_r_outer must be positive.")
-
-        if np.any(section_t <= 0.0):
-            raise ValueError("section_t must be positive.")
-
-        section_fatigue_scf = float(inputs["section_fatigue_scf"])
-
-        if section_fatigue_scf <= 0.0:
-            raise ValueError("section_fatigue_scf must be positive.")
-
-        # For a circular tubular tower section, Ixx and Iyy should be equal.
-        # The requested stress formula uses a single I, therefore the average
-        # is used to avoid numerical noise.
-        I = 0.5 * (Ixx + Iyy)
-
-        theta = np.asarray(theta_stress_points, dtype=float)
-
-        if theta.ndim != 1:
-            raise ValueError("theta_stress_points must be one-dimensional.")
-
-        if theta.size < 4:
-            raise ValueError("At least four theta stress points are required.")
-
-        sin_theta = np.sin(theta)
-        cos_theta = np.cos(theta)
-
-        design_life = float(np.atleast_1d(inputs["design_life"])[0])
-
-        if design_life <= 0.0:
-            raise ValueError("design_life must be positive.")
-
-        scale_to_life = case_probability * design_life / case_duration
-
-        damage_theta = np.zeros((n_sec, theta.size))
-
-        for i_sec in range(n_sec):
-            Fz = Fz_case[i_sec, :]
-            Mx = Mx_case[i_sec, :]
-            My = My_case[i_sec, :]
-
-            for i_theta in range(theta.size):
-                stress = self.calculate_stress(
-                    Fz=Fz,
-                    Mx=Mx,
-                    My=My,
-                    A=A[i_sec],
-                    I=I[i_sec],
-                    R=R[i_sec],
-                    sin_theta=sin_theta[i_theta],
-                    cos_theta=cos_theta[i_theta],
-                    section_fatigue_scf=section_fatigue_scf,
-                )
-
-                damage_theta[i_sec, i_theta] += (
-                    scale_to_life
-                    * self.damage_from_stress_timeseries(
-                        stress=stress,
-                        section_t=section_t[i_sec],
-                        inputs=inputs,
-                    )
-                )
-
-        return damage_theta
-
-    def _check_continuous_fatigue_inputs(self, inputs):
-        """
-        Check shapes and values of continuous fatigue inputs.
-        """
-        if np.any(inputs["section_fatigue_scf"] <= 0.0):
-            raise ValueError("section_fatigue_scf must be positive.")
-
-        if np.any(inputs["fatigue_design_factor"] <= 0.0):
-            raise ValueError("fatigue_design_factor must be positive.")
-
-        if np.any(inputs["sn_tref_full"] <= 0.0):
-            raise ValueError("sn_tref_full must be positive.")
-
-        if self.options["sn_model"] == "linear":
-            if np.any(inputs["sn_m_full"] <= 0.0):
-                raise ValueError("sn_m_full must be positive.")
-        elif self.options["sn_model"] == "bilinear":
-            if np.any(inputs["sn_m1_full"] <= 0.0):
-                raise ValueError("sn_m1_full must be positive.")
-            if np.any(inputs["sn_m2_full"] <= 0.0):
-                raise ValueError("sn_m2_full must be positive.")
-            if np.any(inputs["sn_transition_cycles_full"] <= 0.0):
-                raise ValueError("sn_transition_cycles_full must be positive.")
-
-        design_life = float(np.atleast_1d(inputs["design_life"])[0])
-
-        if design_life <= 0.0:
-            raise ValueError("design_life must be positive.")
-
-    def _get_tower_fatigue_metadata(self, discrete_inputs):
-        """
-        Collect lightweight time-series metadata from discrete inputs.
-
-        Only basic consistency of metadata list lengths is checked. The
-        probabilities are not normalized or redistributed.
-        """
-        ts_dir = discrete_inputs["tower_fatigue_ts_dir"]
-        case_names = list(discrete_inputs["tower_fatigue_case_names"])
-        case_probability = np.asarray(
-            discrete_inputs["tower_fatigue_case_probability"],
-            dtype=float,
-        )
-        case_files = list(discrete_inputs["tower_fatigue_case_files"])
-        load_channels = list(discrete_inputs["tower_fatigue_load_channels"])
-
-        n_cases = len(case_names)
-
-        if len(case_files) != n_cases:
-            raise ValueError(
-                "tower_fatigue_case_files must have the same length as "
-                "tower_fatigue_case_names."
-            )
-
-        if case_probability.shape != (n_cases,):
-            raise ValueError(
-                "tower_fatigue_case_probability must have shape "
-                f"{(n_cases,)}, but received {case_probability.shape}."
-            )
-
-        tower_grid, load_key_map, load_scale_map = (
-            self._parse_tower_fatigue_load_channels(load_channels)
-        )
-
-        metadata = {
-            "ts_dir": ts_dir,
-            "case_names": case_names,
-            "case_probability": case_probability,
-            "case_files": case_files,
-            "tower_grid": tower_grid,
-            "load_key_map": load_key_map,
-            "load_scale_map": load_scale_map,
-        }
-
-        return metadata
 
     def compute(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         """
         Compute tower section properties, lifetime fatigue damage, and fatigue
         constraints.
 
-        The time series are processed one case at a time. If the probability of
-        a case is zero, the corresponding time-series file is not loaded.
+        Active time-series cases are independent. They are processed in parallel
+        when ``n_workers`` is greater than one, then accumulated in the
+        original case order to keep deterministic results.
         """
         n_full = self.options["n_full"]
         n_theta = self.options["n_theta"]
@@ -1442,85 +1118,86 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         if discrete_inputs is None:
             raise ValueError("TowerFatiguePostFrame requires discrete time-series metadata.")
 
-        self._check_continuous_fatigue_inputs(inputs)
-        metadata = self._get_tower_fatigue_metadata(discrete_inputs)
+        sn_model = self.options["sn_model"]
+        n_workers = _get_requested_n_workers(
+            self.options["modeling_options"],
+            self.options["n_workers"],
+            self.options["number_of_workers"],
+        )
+        _check_continuous_fatigue_inputs(inputs, sn_model)
 
-        section_props = self._compute_tower_section_properties(
+        metadata = _get_tower_fatigue_metadata(discrete_inputs)
+        fatigue_settings = _get_fatigue_settings(
+            inputs=inputs,
+            sn_model=sn_model,
+            rainflow_ranges_bins=self.options["rainflow_ranges_bins"],
+        )
+
+        section_props = _compute_tower_section_properties(
             z_full=inputs["z_full"],
             outer_diameter_full=inputs["outer_diameter_full"],
             t_full=inputs["t_full"],
         )
 
-        theta_stress_points = np.linspace(
-            0.0,
-            2.0 * np.pi,
-            n_theta,
-            endpoint=False,
-        )
+        theta_stress_points = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
 
         for name, value in section_props.items():
             outputs[name] = value
 
         outputs["theta_stress_points"] = theta_stress_points
 
-        damage_theta = np.zeros((n_sec, n_theta))
-
+        active_case_requests = []
         for i_case, case_file in enumerate(metadata["case_files"]):
             case_probability = float(metadata["case_probability"][i_case])
 
             if not np.isfinite(case_probability):
-                raise ValueError(
-                    f"case_probability for case {i_case} must be finite."
-                )
-
+                raise ValueError(f"case_probability for case {i_case} must be finite.")
             if case_probability < 0.0:
-                raise ValueError(
-                    f"case_probability for case {i_case} must be non-negative."
-                )
-
+                raise ValueError(f"case_probability for case {i_case} must be non-negative.")
             if case_probability == 0.0:
                 continue
 
-            # Load one active case and convert raw solver units to SI.
-            time, Fz_grid, Mx_grid, My_grid = (
-                self._load_case_tower_loads_on_solver_grid(
-                    ts_dir=metadata["ts_dir"],
-                    case_file=case_file,
-                    tower_grid=metadata["tower_grid"],
-                    load_key_map=metadata["load_key_map"],
-                    load_scale_map=metadata["load_scale_map"],
-                )
+            active_case_requests.append(
+                {
+                    "case_index": i_case,
+                    "case_name": metadata["case_names"][i_case],
+                    "case_file": case_file,
+                    "case_probability": case_probability,
+                }
             )
 
-            case_duration = float(time[-1] - time[0])
+        damage_theta = np.zeros((n_sec, n_theta))
 
-            # Interpolate loads from the solver tower grid to TowerSE section centers.
-            Fz_case, Mx_case, My_case = self._interpolate_tower_loads_to_sections(
+        if active_case_requests:
+            interpolation_spec = _build_tower_load_interpolation_spec(
                 tower_grid=metadata["tower_grid"],
-                Fz_grid=Fz_grid,
-                Mx_grid=Mx_grid,
-                My_grid=My_grid,
                 section_z=section_props["section_z"],
                 z_full=inputs["z_full"],
             )
-
-            # Accumulate lifetime-scaled fatigue damage for this case.
-            damage_theta += self.calculate_damage_for_case(
-                Fz_case=Fz_case,
-                Mx_case=Mx_case,
-                My_case=My_case,
-                case_probability=case_probability,
-                case_duration=case_duration,
-                section_props=section_props,
-                theta_stress_points=theta_stress_points,
-                inputs=inputs,
+            shared_payload = {
+                "ts_dir": metadata["ts_dir"],
+                "tower_grid": metadata["tower_grid"],
+                "load_key_map": metadata["load_key_map"],
+                "load_scale_map": metadata["load_scale_map"],
+                "interpolation_spec": interpolation_spec,
+                "section_fatigue_data": _get_section_fatigue_data(section_props),
+                "theta_stress_points": theta_stress_points,
+                "fatigue_settings": fatigue_settings,
+            }
+            result_by_case, _effective_n_workers = _run_tower_fatigue_case_workers(
+                active_case_requests=active_case_requests,
+                shared_payload=shared_payload,
+                n_workers=n_workers,
             )
+
+            for case_request in active_case_requests:
+                damage_theta += result_by_case[case_request["case_index"]]
 
         fatigue_damage = np.max(damage_theta, axis=1)
 
         outputs["fatigue_damage"] = fatigue_damage
-        outputs["constr_fatigue"] = fatigue_damage * inputs["fatigue_design_factor"]
+        outputs["constr_fatigue"] = fatigue_damage * fatigue_settings["fatigue_design_factor"]
+
 
 if __name__ == "__main__":
     pass
-

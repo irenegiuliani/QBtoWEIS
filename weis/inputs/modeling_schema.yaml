@@ -1151,6 +1151,11 @@ properties:
                 default: 36
                 minimum: 4
                 description: Number of circumferential points around the tower cross-section at which bending stress is evaluated for rainflow counting.
+            n_workers:
+                type: integer
+                default: 1
+                minimum: 1
+                description: Number of case-level worker processes for tower fatigue post-processing. The default value 1 runs serially. Values above 1 enable multiprocessing over active fatigue time-series cases and are capped internally by the number of active cases and available CPUs.
             sn_model:
                 type: string
                 default: bilinear
