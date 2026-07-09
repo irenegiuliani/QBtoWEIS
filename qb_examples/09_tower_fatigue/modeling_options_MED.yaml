@@ -1,0 +1,231 @@
+# Generic modeling options file to run standard WISDEM case
+General:
+    verbosity: False  
+
+    qblade_configuration:
+        flag: True
+        path2qb_dll: r"C:\Users\Giuliani\Software\QBladeEE_2.0.9.5\QBladeEE_2.0.9.5.dll"
+        QB_run_mod: MED-fatigue
+        QB_run_dir: MED-fatigue
+        qbtoweis_output_filter: QBtoWEIS_output_filter.txt
+        number_of_workers: 3
+        model_only: False
+        
+WISDEM:
+    RotorSE:
+        flag: True
+        n_span: 101
+        n_pitch_perf_surfaces: 20
+        n_tsr_perf_surfaces: 20
+        spar_cap_ss: Spar_Cap_SS        
+        spar_cap_ps: Spar_Cap_PS
+        te_ss: TE_reinforcement_SS
+        te_ps: TE_reinforcement_PS
+        peak_thrust_shaving: True
+        thrust_shaving_coeff: 0.8
+        n_sector: 8
+        hubloss: true
+        tiploss: true
+        wakerotation: true
+        usecd: true
+    DriveSE:
+        flag: True
+    TowerSE:             
+        flag: True
+    BOS:
+        flag: False
+    FloatingSE:
+        flag: True
+
+TowerFatigue:
+    flag: true
+    profile: true
+    n_theta: 36
+    sn_model: linear
+    design_life_years: 25.0
+    section_fatigue_scf: 1.0
+    fatigue_design_factor: 1.0
+    sn_k_full: 0.20
+    sn_tref_full: 0.025
+    sn_log_a_full: 12.164
+    sn_m_full: 3.0
+    sn_transition_cycles_full: 1.0e7    
+
+        
+QBlade: 
+    flag: True
+    freeze_loads: True
+    simulation:
+        ADDCHANNELS: ['Aerodynamic Power [W]', 'Aerodynamic Thrust [N]', 'Abs. For. MOO line1 - Floater [N]', 'Abs. For. MOO line2 - Floater [N]', 'Abs. For. MOO line3 - Floater [N]', 'X_l Mean Tension MOO line1 [N]', 'X_l Mean Tension MOO line2 [N]', 'X_l Mean Tension MOO line3 [N]', 'Aerodynamic Power [W]', 'Aerodynamic Thrust [N]', 'X_tt TWR. Top. Trl.Def. [m]', 'X_n Nac. Acc. [m/s^2]', 'Y_n Nac. Acc. [m/s^2]', 'Z_n Nac. Acc. [m/s^2]', 'Z_c Tip Rot.Def. BLD_1 [deg]', 'X_g HYDRO Lin. For. [N]', 'Y_g HYDRO Lin. For. [N]', 'Z_g HYDRO Lin. For. [N]', 'X_l HYDRO Lin. For. [N]', 'Y_l HYDRO Lin. For. [N]', 'Z_l HYDRO Lin. For. [N]', 'X_he HYDRO Lin. For. [N]', 'Y_he HYDRO Lin. For. [N]', 'Z_he HYDRO Lin. For. [N]', 'X_g For. Radiation [N]', 'Y_g For. Radiation [N]', 'Z_g For. Radiation [N]', 'X_l For. Radiation [N]', 'Y_l For. Radiation [N]', 'Z_l For. Radiation [N]', 'X_hh For. Radiation [N]', 'Y_hh For. Radiation [N]', 'Z_hh For. Radiation [N]', 'X_g For. Wave Exc. [N]', 'Y_g For. Wave Exc. [N]', 'Z_g For. Wave Exc. [N]', 'X_l For. Wave Exc. [N]', 'Y_l For. Wave Exc. [N]', 'Z_l For. Wave Exc. [N]', 'X_he For. Wave Exc. [N]', 'Y_he For. Wave Exc. [N]', 'Z_he For. Wave Exc. [N]', 'X_g NP Hydr. Inert. For. [N]', 'Y_g NP Hydr. Inert. For. [N]', 'Z_g NP Hydr. Inert. For. [N]', 'X_l NP Hydr. Inert. For. [N]', 'Y_l NP Hydr. Inert. For. [N]', 'Z_l NP Hydr. Inert. For. [N]', 'X_g NP Hydr. AddMa. For. [N]', 'Y_g NP Hydr. AddMa. For. [N]', 'Z_g NP Hydr. AddMa. For. [N]', 'X_l NP Hydr. AddMa. For. [N]', 'Y_l NP Hydr. AddMa. For. [N]', 'Z_l NP Hydr. AddMa. For. [N]', 'X_g NP Hydr. Drag For. [N]', 'Y_g NP Hydr. Drag For. [N]', 'Z_g NP Hydr. Drag For. [N]', 'X_l NP Hydr. Drag For. [N]', 'Y_l NP Hydr. Drag For. [N]', 'Z_l NP Hydr. Drag For. [N]', 'Z_g For. Buoy. [N]']
+        Simulate: True
+        MODNEWTONITER: 1
+        STOREFROM: 100.0                                              
+        DLCGenerator: True
+        TIMESTEP: 0.04
+        PRESCRIBETYPE: 0
+        ISOFFSHORE: 1
+        RAMPUP: 50
+        ADDDAMP: 50
+        INCLUDEHYDRO: 1
+        wave_flag: True
+        STOREHYDRO: true
+        WAVESTRETCHING: 1
+
+    Aero:
+        ROTORTYPE: HAWT         # only option for now
+        INVERTEDFOILS: False    # dummy variable, only used for VAWTs
+    Main:
+        GLBGEOEPS: 0.2
+        DRTRDOF: False
+        DEF_OUT: True
+        BLD_1: [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0]
+        BLD_2: [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0]
+        BLD_3: [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0]
+        TWR: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]                                                            
+    Tower:
+        CRITDAMP: 2           
+        USECRITDAMP: True                                          
+        DISCTYPE: 0         # linear interpolation
+        DISC: 50
+    Blade:
+        CRITDAMP: 2           
+        USECRITDAMP: True                                                                       
+        beamdyn_file: MED-15-300_v0.0.1_BD_Blade.dat                                                            
+        MASSTUNER: 1.0
+        DISCTYPE: 1         # cosine interpolation and decrease the number of stations
+        DISC: 50
+        BEAMTYPE: 2
+    Turbine:
+        CONTROLLERTYPE: 1
+        CONTROLLERFILE: 'libdiscon_ROSCO-2.9.0'
+        DISCTYPE: 2         # cosine interpolation, and decrease the number of stations
+        NUMPANELS: 40
+        WAKETYPE: 1         #unsteady bem
+        BEMSPEEDUP: 20
+        DYNSTALLTYPE: 2     #IAG
+        UNSTEADYAERO: True
+    QBladeOcean:
+        ISFLOATING: True
+        USEADVANCEDBUOYANCY: True
+        ADVANCEDBUOYANCY: 100.0
+        WAVEKINEVAL_MOR: 0 # local evaluation of relative water velocity
+        IsBuoy: 1
+        MCFC: 1
+        POTFLOW: False # strip theory only
+        override_morison_coefficients: True
+        DISCTYPE: 1 # 1-equal frequency spacing wave spectrum
+        NUMFREQ: 10000
+        MemberName: [main_column, column1, column2, column3, Y_pontoon_upper1, Y_pontoon_upper2, Y_pontoon_upper3, Y_pontoon_lower1, Y_pontoon_lower2, Y_pontoon_lower3]
+        ElmDsc: [50.0, 50.0, 50.0, 50.0, 10.0, 10.0, 10.0, 100.0, 100.0, 100.0]  
+        HydroCdN:  {main_column: [0.6, 0.6],
+                    column1: [0.6, 0.6],
+                    column2: [0.6, 0.6],
+                    column3: [0.6, 0.6],
+                    Y_pontoon_upper1: [0.6, 0.6], 
+                    Y_pontoon_upper2: [0.6, 0.6], 
+                    Y_pontoon_upper3: [0.6, 0.6], 
+                    Y_pontoon_lower1: [2.0, 2.0], 
+                    Y_pontoon_lower2: [2.0, 2.0], 
+                    Y_pontoon_lower3: [2.0, 2.0]}
+        HydroCaN:  {main_column: [1.1, 1.1],
+                    column1: [1.1, 1.1],
+                    column2: [1.1, 1.1],
+                    column3: [1.1, 1.1],
+                    Y_pontoon_upper1: [1.1, 1.1], 
+                    Y_pontoon_upper2: [1.1, 1.1], 
+                    Y_pontoon_upper3: [1.1, 1.1], 
+                    Y_pontoon_lower1: [2.0, 2.0], 
+                    Y_pontoon_lower2: [2.0, 2.0], 
+                    Y_pontoon_lower3: [2.0, 2.0]}
+        HydroCpN: {main_column: [1.0, 1.0],
+                    column1: [1.0, 1.0],
+                    column2: [1.0, 1.0],
+                    column3: [1.0, 1.0],
+                    Y_pontoon_upper1: [1.0, 1.0], 
+                    Y_pontoon_upper2: [1.0, 1.0], 
+                    Y_pontoon_upper3: [1.0, 1.0], 
+                    Y_pontoon_lower1: [1.0, 1.0], 
+                    Y_pontoon_lower2: [1.0, 1.0], 
+                    Y_pontoon_lower3: [1.0, 1.0]}
+        HydroCdNy:  {
+                    Y_pontoon_lower1: [2.0, 2.0], 
+                    Y_pontoon_lower2: [2.0, 2.0], 
+                    Y_pontoon_lower3: [2.0, 2.0]}
+        HydroCaNy:  {
+                    Y_pontoon_lower1: [1.0, 1.0], 
+                    Y_pontoon_lower2: [1.0, 1.0], 
+                    Y_pontoon_lower3: [1.0, 1.0]}
+        HydroCpNy: {                       
+                    Y_pontoon_lower1: [1.0, 1.0], 
+                    Y_pontoon_lower2: [1.0, 1.0], 
+                    Y_pontoon_lower3: [1.0, 1.0]}
+        HydroCdA:  {main_column: [4.0, 0.0],
+                    column1: [4.0, 0.0],
+                    column2: [4.0, 0.0],
+                    column3: [4.0, 0.0],
+                    Y_pontoon_upper1: [0.0, 0.0], 
+                    Y_pontoon_upper2: [0.0, 0.0], 
+                    Y_pontoon_upper3: [0.0, 0.0], 
+                    Y_pontoon_lower1: [0.0, 0.0], 
+                    Y_pontoon_lower2: [0.0, 0.0], 
+                    Y_pontoon_lower3: [0.0, 0.0]}
+        HydroCaA:  {main_column: [1.0, 1.0],
+                    column1: [1.0, 1.0],
+                    column2: [1.0, 1.0],
+                    column3: [1.0, 1.0],
+                    Y_pontoon_upper1: [0.0, 0.0], 
+                    Y_pontoon_upper2: [0.0, 0.0], 
+                    Y_pontoon_upper3: [0.0, 0.0], 
+                    Y_pontoon_lower1: [0.0, 0.0], 
+                    Y_pontoon_lower2: [0.0, 0.0], 
+                    Y_pontoon_lower3: [0.0, 0.0]}
+        HydroCpA:  {main_column: [1.0, 1.0],
+                    column1: [1.0, 1.0],
+                    column2: [1.0, 1.0],
+                    column3: [1.0, 1.0],
+                    Y_pontoon_upper1: [0.0, 0.0], 
+                    Y_pontoon_upper2: [0.0, 0.0], 
+                    Y_pontoon_upper3: [0.0, 0.0], 
+                    Y_pontoon_lower1: [0.0, 0.0], 
+                    Y_pontoon_lower2: [0.0, 0.0], 
+                    Y_pontoon_lower3: [0.0, 0.0]} 
+
+
+DLC_driver:
+    metocean_conditions:
+        wind_speed: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+        wave_height_NSS: [0.472219794505006, 0.491410842002054, 0.529077516554646, 0.584610061446536, 0.65749872798398, 0.74735125469922, 0.853890119810585, 0.976940737265114, 1.11641528226165, 1.27229492050719, 1.4446122973179, 1.63343552031695, 1.83885437972064, 2.06096914897543, 2.2998820134311, 2.55569094149506, 2.82848569128056, 3.11834557092434, 3.42533852616432, 3.74952125622815, 4.09093994642715, 4.44963140853138, 4.82562440765966, 5.21894102525361, 5.62959796015258]
+        wave_period_NSS: [4.74128080138906, 4.78869320465986, 4.87892764064547, 5.00586007711084, 5.16299152886132, 5.34435913247832, 5.5449750104997, 5.76091640782874, 5.98922342833117, 6.22772153107308, 6.47483535177953, 6.72942400733422, 6.99064766176612, 7.25786551391286, 7.53056157194067, 7.80829345021590, 8.09065943608270, 8.37727945137338, 8.66778602070399, 8.96182202293025, 9.25904243190519, 9.55911799594315, 9.86173931382077, 10.1666203157210, 10.4735006172478]
+        wave_height_SSS: [3.74360090480558, 3.82948801748901, 3.85181743805716, 3.90694508434051, 4.00428148250684, 4.13731536925502, 4.2971756290449, 4.47591393231550, 4.66668763420001, 4.86675355225463, 5.07405572752421, 5.28702419029784, 5.50551053700363, 5.72998886450349, 5.96151149844260, 6.19984709847369, 6.44539342790672, 6.69915709310639, 6.96110572389894, 7.23024852125537, 7.50694568824626, 7.78929959775663, 8.07577860732848, 8.36365653914286, 8.64876938760777]
+        wave_period_SSS: [8.95655991920562, 9.03252503274264, 9.05214537452044, 9.10036041842691, 9.18472793770250, 9.29851133867706, 9.4330094360443, 9.58065286885446, 9.73522115040788, 9.89415793827516, 10.0556214735149, 10.2182739129587, 10.3819319007513, 10.5468781195218, 10.7137863673340, 10.8823797629209, 11.0528331594832, 11.2257184044738, 11.4008756441307, 11.5775315410301, 11.7558301619964, 11.9344888935073, 12.1125408849900, 12.2883630637845, 12.4595845505723]
+        wave_height_fatigue: [0.472219794505006, 0.491410842002054, 0.529077516554646, 0.584610061446536, 0.65749872798398, 0.74735125469922, 0.853890119810585, 0.976940737265114, 1.11641528226165, 1.27229492050719, 1.4446122973179, 1.63343552031695, 1.83885437972064, 2.06096914897543, 2.2998820134311, 2.55569094149506, 2.82848569128056, 3.11834557092434, 3.42533852616432, 3.74952125622815, 4.09093994642715, 4.44963140853138, 4.82562440765966, 5.21894102525361, 5.62959796015258]
+        wave_period_fatigue: [4.74128080138906, 4.78869320465986, 4.87892764064547, 5.00586007711084, 5.16299152886132, 5.34435913247832, 5.5449750104997, 5.76091640782874, 5.98922342833117, 6.22772153107308, 6.47483535177953, 6.72942400733422, 6.99064766176612, 7.25786551391286, 7.53056157194067, 7.80829345021590, 8.09065943608270, 8.37727945137338, 8.66778602070399, 8.96182202293025, 9.25904243190519, 9.55911799594315, 9.86173931382077, 10.1666203157210, 10.4735006172478]
+        wave_height_1: 7.0929293791495
+        wave_period_1: 12.2870085734064
+        wave_height_50: 9.65148229774426
+        wave_period_50: 14.3327772898145
+        
+    DLCs:
+        - DLC: "Custom"
+          n_seeds: 2
+          transient_time: 100.0 
+          analysis_time: 100.0
+          wind_speed:    [6.0,  6.0,  8.0]  #just random conditions for dlc 1.2
+          wave_height:   [1.1,  1.8,  1.4]
+          wave_period:   [6.8,  8.2,  7.1]
+          wave_heading:  [0.0, 30.0,  0.0]
+          probabilities: [0.38, 0.23, 0.39]
+          turbulent_wind:
+              HubHt: 184.0
+              GridHeight: 350.0
+              GridWidth: 350.0
+              Clockwise: True
+              RefHt: 180.0
+              PLExp: 0.11
+              IECturbc: -1
+              IEC_WindType: 'NTM'
+
+ROSCO:
+    flag: True
+    tuning_yaml: MED15-308_ROSCO_CoDesign.yaml
+                                                 

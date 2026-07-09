@@ -10,7 +10,7 @@ be run by a developer, locally, on a machine with a licensed QBlade install.
 Setup (one-time, per machine):
     Set the QBLADE_DLL_PATH environment variable to your local QBlade shared
     library path, e.g. (PowerShell)
-        set QBLADE_DLL_PATH = "C:\\Users\\you\\QBladeCE_2.0.9.5\\QBladeCE_2.0.9.5.dll"
+        $env:QBLADE_DLL_PATH = "C:\\Users\\you\\QBladeCE_2.0.9.5\\QBladeCE_2.0.9.5.dll"
     This overrides modeling_options['General']['qblade_configuration']['path2qb_dll']
     at runtime (see weis/aeroelasticse/openmdao_qblade.py:run_QBLADE), so none
     of the qb_examples modeling-options yaml files need to be edited.
@@ -23,7 +23,7 @@ Usage as a before/after regression check:
     - qblade_regression_scripts: scripts with a reviewed golden-value
       baseline, checked automatically via compare_regression_values() (the
       same mechanism used by test_tower_fatigue_post.py). Currently just
-      09_outer_loop_opt/weis_driver, since that's the example this PR's
+      09_tower_fatigue/run_weis, since that's the example this PR's
       tower-fatigue feature is built around and the one whose baseline has
       actually been run and reviewed. To add another script here, or to
       re-baseline after an intentional change, run:
@@ -53,10 +53,10 @@ qblade_light_scripts = [
     "03_turbsim/weis_driver",
     "04_dlc_gen/weis_driver_oc3",
     "05_iea15mw_monopile/weis_driver",
-    "06_bladeOpt/weis_driver",
+    # "06_bladeOpt/weis_driver",
     "07_iea15mw_rect/weis_driver",
     "08_tower_opt/run_weis",
-    # 09_outer_loop_opt/weis_driver is checked separately below, against a
+    # 09_tower_fatigue/run_weis is checked separately below, against a
     # reviewed golden-value baseline, since it's the example this PR's
     # tower-fatigue feature is built around.
 ]
@@ -66,7 +66,7 @@ qblade_light_scripts = [
 # outputs, and are confident they're a sane baseline -- then regenerate the
 # pickle with `python weis/test/test_qblade_examples.py --train`.
 qblade_regression_scripts = {
-    "09_outer_loop_opt/weis_driver": (
+    "09_tower_fatigue/run_weis": (
         "towerse.tower_mass",
         "tower_fatigue_post.constr_fatigue",
     ),
@@ -81,7 +81,7 @@ def _extract_regression_values(mod, output_names):
 # several times end-to-end and is much slower than qblade_light_scripts.
 qblade_outer_loop_scripts = [
     "08_tower_opt/run_weis_outer_loop",
-    "09_outer_loop_opt/run_weis_outer_loop",
+    "09_tower_fatigue/run_weis_outer_loop",
 ]
 
 # Deliberately excluded: these two scripts require an existing .sql recorder

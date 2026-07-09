@@ -17,18 +17,18 @@ numbers, regenerate the golden values with:
 import os
 import sys
 import tempfile
+from contextlib import redirect_stdout
+from importlib import reload
+from io import StringIO
 from unittest import mock
 
 import numpy as np
-import pandas as pd
 import openmdao.api as om
+import pandas as pd
 import unittest
 
 from weis.aeroelasticse import tower_fatigue_post as tftp
-from weis.aeroelasticse.tower_fatigue_post import (
-    TowerFatiguePostFrame,
-    _smoke_test_scale_to_si,
-)
+from weis.aeroelasticse.tower_fatigue_post import TowerFatiguePostFrame
 from weis.test.utils import compare_regression_values
 
 this_dir = os.path.dirname(os.path.realpath(__file__))
@@ -158,6 +158,13 @@ class TestTowerFatiguePost(unittest.TestCase):
             tol=1e-6,
         )
 
+    def test_linear_sn_model_produces_finite_damage(self):
+        values = _run_tower_fatigue_component(sn_model="linear")
+        damage = values["fatigue_damage"]
+
+        self.assertTrue(np.all(np.isfinite(damage)))
+        self.assertTrue(np.all(damage > 0.0))
+
     def test_damage_is_nonzero_and_decreases_up_the_tower(self):
         # Physical sanity check independent of the golden file: with larger
         # loads concentrated at the tower base, damage should be highest
@@ -169,9 +176,52 @@ class TestTowerFatiguePost(unittest.TestCase):
         self.assertTrue(np.all(np.diff(damage) <= 0.0))
 
     def test_scale_to_si_smoke_test(self):
-        # Fold the module's built-in unit-conversion smoke test into the
-        # pytest-discovered suite so CI actually exercises it.
-        _smoke_test_scale_to_si()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            case_file = "scale_to_si_case.p"
+            pd.DataFrame(
+                {
+                    "Time": np.array([0.0, 1.0, 2.0]),
+                    "Fz0": np.array([1.0, 2.0, 3.0]),
+                    "Mx0": np.array([4.0, 5.0, 6.0]),
+                    "My0": np.array([7.0, 8.0, 9.0]),
+                    "Fz1": np.array([2.0, 3.0, 4.0]),
+                    "Mx1": np.array([5.0, 6.0, 7.0]),
+                    "My1": np.array([8.0, 9.0, 10.0]),
+                }
+            ).to_pickle(os.path.join(tmpdir, case_file))
+
+            _time, Fz_grid, Mx_grid, My_grid = (
+                tftp._load_case_tower_loads_on_solver_grid(
+                    ts_dir=tmpdir,
+                    case_file=case_file,
+                    tower_grid=np.array([0.0, 1.0]),
+                    load_key_map=[
+                        {"Fz": "Fz0", "Mx": "Mx0", "My": "My0"},
+                        {"Fz": "Fz1", "Mx": "Mx1", "My": "My1"},
+                    ],
+                    load_scale_map=[
+                        {"Fz": 1.0e3, "Mx": 1.0e3, "My": 1.0e3},
+                        {"Fz": 1.0e3, "Mx": 1.0e3, "My": 1.0e3},
+                    ],
+                )
+            )
+
+        np.testing.assert_allclose(
+            Fz_grid[0, :], np.array([1.0, 2.0, 3.0]) * 1.0e3
+        )
+        np.testing.assert_allclose(
+            Mx_grid[1, :], np.array([5.0, 6.0, 7.0]) * 1.0e3
+        )
+        np.testing.assert_allclose(
+            My_grid[1, :], np.array([8.0, 9.0, 10.0]) * 1.0e3
+        )
+
+    def test_module_reload_is_silent(self):
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            reload(tftp)
+
+        self.assertEqual(stdout.getvalue(), "")
 
     def test_default_serial_matches_explicit_serial_worker_path(self):
         default_values = _run_tower_fatigue_component(sn_model="bilinear")
@@ -266,7 +316,7 @@ class TestTowerFatiguePost(unittest.TestCase):
                             tftp._run_tower_fatigue_case_workers(
                                 active_case_requests=active_case_requests,
                                 shared_payload=shared_payload,
-                                requested_n_workers=2,
+                                n_workers=2,
                             )
                         )
 

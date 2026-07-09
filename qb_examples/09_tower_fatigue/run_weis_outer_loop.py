@@ -39,9 +39,9 @@ from weis.glue_code.runWEIS import run_weis
 # Configuration - edit these to match your run
 # ---------------------------------------------------------------------------
 run_dir = os.path.dirname(os.path.realpath(__file__))
-fname_wt_input = os.path.join(run_dir, "IEA-15-240-RWT_VolturnUS-S_rectangular.yaml")
-fname_modeling_options = os.path.join(run_dir, "modeling_options_custom_dlc.yaml")
-fname_analysis_options = os.path.join(run_dir, "analysis_options_opt.yaml")
+fname_wt_input = os.path.join(run_dir, "MED-15-300-RWT.yaml")
+fname_modeling_options = os.path.join(run_dir, "modeling_options_MED.yaml")
+fname_analysis_options = os.path.join(run_dir, "analysis_options_MED.yaml")
 
 N_OUTER = 5
 OUTER_TOL = 5e-3
@@ -199,7 +199,7 @@ def run_outer_loop():
             )
 
         # Phase B: inner optimizer with frozen loads.
-        outer_sql = f"{rec_base}_outer_{outer_k}.sql"
+        outer_sql = f"{rec_base}outer{outer_k}.sql"
         outer_recorder = _add_outer_recorder(wt_opt, opt_options, folder_output, outer_sql)
 
         print(f"[outer {outer_k}] Phase B - running inner optimizer (loads frozen)...")
