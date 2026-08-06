@@ -2465,6 +2465,51 @@ class QBLADELoadCases(ExplicitComponent):
         else:
             outputs = self.calculate_AEP(summary_stats, inputs, outputs, discrete_inputs)
 
+    def _result_case_row_map(self, result_table, n_cases, failed_sim_ids, table_name):
+        """Map original DLC case IDs to row positions in a pCrunch result table."""
+        if result_table is None:
+            raise RuntimeError(f"{table_name} is None")
+
+        # pCrunch uses the analyzed output filename as the DataFrame row label.
+        parsed_case_ids = []
+        for label in result_table.index:
+            match = re.search(r'_(\d+)_completed(?:\.(?:outb|out))?$', str(label))
+            if match is None:
+                parsed_case_ids = []
+                break
+            parsed_case_ids.append(int(match.group(1)))
+
+        if parsed_case_ids:
+            if len(set(parsed_case_ids)) != len(parsed_case_ids):
+                raise RuntimeError(f"{table_name} contains duplicated QBlade case IDs: {parsed_case_ids}")
+
+            invalid = [case_id for case_id in parsed_case_ids if case_id < 0 or case_id >= n_cases]
+            if invalid:
+                raise RuntimeError(
+                    f"{table_name} contains case IDs outside [0, {n_cases - 1}]: {invalid}"
+                )
+            result_case_ids = parsed_case_ids
+        else:
+            # Fallback for pCrunch versions returning a RangeIndex.
+            failed_set = {
+                int(case_id)
+                for case_id in (failed_sim_ids or [])
+                if 0 <= int(case_id) < n_cases
+            }
+            result_case_ids = [case_id for case_id in range(n_cases) if case_id not in failed_set]
+
+            if len(result_case_ids) != len(result_table):
+                raise RuntimeError(
+                    f"{table_name} has {len(result_table)} rows, but the failure log "
+                    f"implies {len(result_case_ids)} successful cases out of {n_cases}. "
+                    "The failure log and the actual QBlade output files are inconsistent."
+                )
+
+        return {
+            case_id: row_position
+            for row_position, case_id in enumerate(result_case_ids)
+        }
+
     def get_weighted_DELs(self, DELs, damage, discrete_inputs, outputs, dlc_generator, failed_sim_ids):
         modopt = self.options['modeling_options']
         custom_ids = [i for i, c in enumerate(dlc_generator.cases) if c.label == 'Custom'] if dlc_generator is not None else []
@@ -2478,10 +2523,31 @@ class QBLADELoadCases(ExplicitComponent):
                 logger.warning(f'WARNING: Custom DLC case probabilities sum to {prob_sum:.6f}, not 1.0. Fatigue DEL/damage weighting will use the provided partial probability mass.')
 
             failed_sim_ids = failed_sim_ids or []
-            active_ids = [i for i in custom_ids if i not in failed_sim_ids]
+
+            if len(DELs) != len(damage):
+                raise RuntimeError(
+                    f"DEL/damage row mismatch: DELs={len(DELs)}, damage={len(damage)}"
+                )
+            if not DELs.index.equals(damage.index):
+                raise RuntimeError("DEL and damage tables do not have the same QBlade case index")
+
+            case_to_row = self._result_case_row_map(
+                DELs,
+                dlc_generator.n_cases,
+                failed_sim_ids,
+                "DEL table",
+            )
+
+            # active_ids are original DLC IDs; active_rows are compressed pCrunch rows.
+            active_ids = [case_id for case_id in custom_ids if case_id in case_to_row]
+            active_rows = [case_to_row[case_id] for case_id in active_ids]
+
+            if not active_ids:
+                raise RuntimeError("No successful Custom DLC cases are available for fatigue weighting")
+
             U = np.array([dlc_generator.cases[i].URef for i in active_ids])
-            DELs = DELs.iloc[active_ids]
-            damage = damage.iloc[active_ids]
+            DELs = DELs.iloc[active_rows].copy().reset_index(drop=True)
+            damage = damage.iloc[active_rows].copy().reset_index(drop=True)
 
             # Preserve joint-state weighting from the Custom lookup table at case level.
             ws_prob = np.array([dlc_generator.cases[i].probability for i in active_ids])
@@ -2521,6 +2587,16 @@ class QBLADELoadCases(ExplicitComponent):
             ws_prob /= ws_prob.sum()
         
         
+        DELs = DELs.reset_index(drop=True)
+        damage = damage.reset_index(drop=True)
+        ws_prob = np.asarray(ws_prob, dtype=float)
+
+        if len(DELs) != len(ws_prob) or len(damage) != len(ws_prob):
+            raise RuntimeError(
+                "Fatigue weighting length mismatch after failed-case filtering: "
+                f"DELs={len(DELs)}, damage={len(damage)}, probabilities={len(ws_prob)}"
+            )
+
         # Scale all DELs and damage by probability and collapse over the various DLCs (inner dot product)
         # Also work around NaNs
         DELs = DELs.fillna(0.0).multiply(ws_prob, axis=0).sum()
@@ -2611,15 +2687,28 @@ class QBLADELoadCases(ExplicitComponent):
                     idx_pwrcrv = custom_ids
                     U = [dlc_generator.cases[i_case].URef for i_case in custom_ids]
 
-            idx_pwrcrv = np.array(idx_pwrcrv, dtype=int)
-            U = np.array(U)
+            requested_case_ids = list(idx_pwrcrv)
+            case_to_row = self._result_case_row_map(
+                sum_stats,
+                dlc_generator.n_cases,
+                failed_sim_ids,
+                "summary statistics table",
+            )
 
-            if len(failed_sim_ids) > 0:
-                mask = ~np.isin(idx_pwrcrv, failed_sim_ids)
-                idx_pwrcrv = idx_pwrcrv[mask]
-                U = U[mask]
+            # Keep original case IDs for probability lookup, but select compressed rows.
+            idx_pwrcrv = np.array(
+                [case_id for case_id in requested_case_ids if case_id in case_to_row],
+                dtype=int,
+            )
+            if len(idx_pwrcrv) == 0:
+                raise RuntimeError("No successful QBlade cases are available for AEP calculation")
 
-            stats_pwrcrv = sum_stats.iloc[idx_pwrcrv].copy()
+            row_pwrcrv = [case_to_row[case_id] for case_id in idx_pwrcrv]
+            U = np.array(
+                [dlc_generator.cases[case_id].URef for case_id in idx_pwrcrv],
+                dtype=float,
+            )
+            stats_pwrcrv = sum_stats.iloc[row_pwrcrv].copy().reset_index(drop=True)
         
         else:
             U = []
