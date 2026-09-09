@@ -13,8 +13,10 @@ cutoff, or infer a Weibull distribution.
 """
 
 import concurrent.futures
+import logging
 import os
 from pathlib import Path
+from time import perf_counter
 
 import fatpack
 import numpy as np
@@ -994,6 +996,7 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
         when ``n_workers`` is greater than one, then accumulated in the
         original case order to keep deterministic results.
         """
+        fatigue_start = perf_counter()
         n_theta = self.options["n_theta"]
         n_sec = self.options["n_full"] - 1
 
@@ -1078,3 +1081,4 @@ class TowerFatiguePostFrame(om.ExplicitComponent):
 
         outputs["fatigue_damage"] = fatigue_damage
         outputs["constr_fatigue"] = fatigue_damage * fatigue_design_factor
+        logging.getLogger(__name__).info("⏱️ Tower fatigue analysis completed in %.3f s TOTAL.", perf_counter() - fatigue_start)
