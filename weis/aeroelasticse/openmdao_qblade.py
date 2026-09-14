@@ -102,6 +102,7 @@ class QBLADELoadCases(ExplicitComponent):
         self.n_blades      = modopt['assembly']['number_of_blades']
         self.n_span        = n_span    = rotorse_options['n_span']
         self.n_pc          = n_pc      = rotorse_options['n_pc']
+        self.n_mooring_lines = (modopt["mooring"]["n_lines"] if modopt["flags"]["mooring"] else 0)
 
         # Environmental Conditions needed regardless of where model comes from
         self.add_input('V_cutin',     val=0.0, units='m/s',      desc='Minimum wind speed where turbine operates (cut-in)')
@@ -440,13 +441,10 @@ class QBLADELoadCases(ExplicitComponent):
         self.add_output('Mean_PtfmPitch',       val=0.0,                                    desc='Maximum of mean platform pitch angles over a set of QBlade simulations')
 
         # Mooring line outputs
-        self.add_output('Max_MoorLineTension1',    val=0.0,                    units='N',      desc='Maximum tension in mooring line 1')
-        self.add_output('Max_MoorLineTension2',    val=0.0,                    units='N',      desc='Maximum tension in mooring line 2')
-        self.add_output('Max_MoorLineTension3',    val=0.0,                    units='N',      desc='Maximum tension in mooring line 3')    
-        self.add_output('moor_axial_load_ratio1',  val=0.0,                    units='N',      desc='Maximum axial load in mooring line 1')
-        self.add_output('moor_axial_load_ratio2',  val=0.0,                    units='N',      desc='Maximum axial load in mooring line 2')
-        self.add_output('moor_axial_load_ratio3',  val=0.0,                    units='N',      desc='Maximum axial load in mooring line 3')
-
+        if modopt["flags"]["mooring"]:
+            self.add_output("Max_MoorLineTension", val=np.zeros(self.n_mooring_lines), units="N", desc="Maximum tension in each mooring line")
+            self.add_output("moor_axial_load_ratio", val=np.zeros(self.n_mooring_lines), desc="ULS axial load utilization of each mooring line")
+            
         # Fatigue output
         self.add_output('damage_blade_root_sparU',  val=0.0, desc="Miner's rule cumulative damage to upper spar cap at blade root")
         self.add_output('damage_blade_root_sparL',  val=0.0, desc="Miner's rule cumulative damage to lower spar cap at blade root")
@@ -1525,7 +1523,6 @@ class QBLADELoadCases(ExplicitComponent):
                 qb_vt['QBladeOcean']['ElmDsc'] = qb_vt['QBladeOcean']['ElmDsc']
 
                 
-        
             if modopt['flags']['mooring']:
                 mooropt = modopt["mooring"]
                 
@@ -1552,14 +1549,25 @@ class QBLADELoadCases(ExplicitComponent):
                 qb_vt['QBladeOcean']['MooDiameter'] = moo_diameter
 
                 # Mooring members
-                # TODO generalize a bit
-                con1 = []
-                con2 = []
-                for i, row in enumerate(inputs['nodes_location_full']):
-                    if mooropt["node_type"][i] == "fixed":
-                        con1.append(f"GRD_{row[0]}_{row[1]}")
-                    elif mooropt["node_type"][i] == "vessel":
-                        con2.append(f"FLT_{row[0]}_{row[1]}_{row[2]}")
+                node_idx = {name: i for i, name in enumerate(mooropt["node_names"])}
+
+                def qblade_connection(node_name):
+                    if node_name not in node_idx:
+                        raise ValueError(f'Mooring node "{node_name}" does not exist.')
+                    
+                    i = node_idx[node_name]
+                    xyz = inputs["nodes_location_full"][i]
+                    node_type = mooropt["node_type"][i]
+
+                    if node_type == "fixed":
+                        return f"GRD_{xyz[0]}_{xyz[1]}"
+                    if node_type == "vessel":
+                        return f"FLT_{xyz[0]}_{xyz[1]}_{xyz[2]}"
+
+                    raise NotImplementedError(f'QBlade mooring node "{node_name}" has unsupported node_type "{node_type}".')
+
+                con1 = [qblade_connection(node) for node in mooropt["node1"]]
+                con2 = [qblade_connection(node) for node in mooropt["node2"]]
                 
                 ########## This is required to interpret the HEXAFLOAT ##########
                 # for i, node in enumerate(mooropt['node_names']): 
@@ -2125,9 +2133,10 @@ class QBLADELoadCases(ExplicitComponent):
             
             if modopt['flags']['floating']:
                 channels_out += ["NP Trans. X_g [m]", "NP Trans. Y_g [m]", "NP Trans. Z_g [m]", "NP Roll X_l [deg]", "NP Pitch Y_l [deg]", "NP Yaw Z_l [deg]"]
-                channels_out += ['X_l Mean Tension MOO line1 [N]', 'X_l Mean Tension MOO line2 [N]', 'X_l Mean Tension MOO line3 [N]']
-                channels_out += ['Abs. For. MOO line1 - Floater [N]', 'Abs. For. MOO line2 - Floater [N]', 'Abs. For. MOO line3 - Floater [N]']
-                
+                channels_out += [f'X_l Mean Tension MOO line{i+1} [N]' for i in range(self.n_mooring_lines)]
+                channels_out += [f'Abs. For. MOO line{i+1} - Floater [N]' for i in range(self.n_mooring_lines)]
+
+
             # Sensors required for monopile post-processing
             if modopt['flags']['monopile']:
                 for idx, member in enumerate (self.qb_vt['QBladeOcean']['SUB_Sensors']):
@@ -2335,7 +2344,7 @@ class QBLADELoadCases(ExplicitComponent):
                     return outputs
             if modopt['flags']['mooring']:
                 try:
-                    outputs = self.get_mooring_loading(summary_stats, inputs, outputs)
+                    outputs = self.get_mooring_loading(summary_stats, inputs, outputs, modopt)
                 except Exception as e:
                     logger.error(f"[MOORING LOADING] Error in get_mooring_loading: {e}", exc_info=True)
                     return outputs
@@ -2786,37 +2795,23 @@ class QBLADELoadCases(ExplicitComponent):
 
         return outputs
         
-    def get_mooring_loading(self, sum_stats, inputs, outputs):      
+    def get_mooring_loading(self, sum_stats, inputs, outputs, modopt):      
         gamma = 2.4   #safety factor from https://docs.nrel.gov/docs/fy25osti/91416.pdf +20%
         # this needs to be added to "ADDCHANNELS" input
-        try:
-            outputs['Max_MoorLineTension1'] = np.max(sum_stats['Abs. For. MOO line1 - Floater']['mean'])*1000 # [N]
-            outputs['moor_axial_load_ratio1'] = gamma*outputs['Max_MoorLineTension1']/inputs['mooring_MBL'][0] 
-        except Exception as e: 
-            outputs['Max_MoorLineTension1'] = 0
-            outputs['moor_axial_load_ratio1'] = 0
-            print('[WARNING] : Could not assign value for "Max_MoorLineTension1". Please Make sure to add "Abs. For. MOO line1 - Floater [N]" to "ADDCHANNELS" in "modeling options" file. ')
-            print('[ERROR] ', str(e))
+        for i in range(self.n_mooring_lines):
+            channel = f"Abs. For. MOO line{i+1} - Floater"
 
-        try:
-            outputs['Max_MoorLineTension2'] = np.max(sum_stats['Abs. For. MOO line2 - Floater']['mean'])*1000
-            outputs['moor_axial_load_ratio2'] = gamma*outputs['Max_MoorLineTension2']/inputs['mooring_MBL'][1] 
-        except Exception as e: 
-            outputs['Max_MoorLineTension2'] = 0
-            outputs['moor_axial_load_ratio2'] = 0
-            print('[WARNING] : Could not assign value for "Max_MoorLineTension2". Please Make sure to add "Abs. For. MOO line2 - Floater [N]" to "ADDCHANNELS" in "modeling options" file. ')
-            print('[ERROR] ', str(e))
-            
-        try:
-            outputs['Max_MoorLineTension3'] = np.max(sum_stats['Abs. For. MOO line3 - Floater']['mean'])*1000
-            outputs['moor_axial_load_ratio3'] = gamma*outputs['Max_MoorLineTension3']/inputs['mooring_MBL'][2] 
-        except Exception as e: 
-            outputs['Max_MoorLineTension3'] = 0
-            outputs['moor_axial_load_ratio3'] = 0
-            print('[WARNING] : Could not assign value for "Max_MoorLineTension3". Please Make sure to add "Abs. For. MOO line3 - Floater [N]" to "ADDCHANNELS" in "modeling options" file. ')
-            print('[ERROR] ', str(e))
-            
-        return outputs   
+            try:
+                outputs["Max_MoorLineTension"][i] = np.max(sum_stats[channel]["max"]) * 1000.0  #ULS maximum tension in N
+                outputs["moor_axial_load_ratio"][i] = (gamma * outputs["Max_MoorLineTension"][i] / inputs["mooring_MBL"][i])
+                
+            except Exception as e:
+                outputs["Max_MoorLineTension"][i] = 0.0
+                outputs["moor_axial_load_ratio"][i] = 0.0
+                print(f'[WARNING] : Could not assign mooring loading for line {i+1}. Please make sure "{channel} [N]" is exported by QBlade.')
+                print("[ERROR] ", str(e))
+
+        return outputs
 
     def get_rotor_loading(self, sum_stats, outputs):
             
