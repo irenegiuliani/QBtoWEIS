@@ -529,7 +529,29 @@ properties:
                                 default: 1.0
                                 minimum: 0.0
                                 description: Upper bound on tower_fatigue_post.constr_fatigue (normalized Miner's rule damage). Default is 1.0.
-
+                    mooring_fatigue:
+                        type: object
+                        description: Mooring chain tension-tension fatigue constraint using T-N curves and Miner's rule.
+                        default: {}
+                        properties:
+                            flag: *flag
+                            max:
+                                type: number
+                                default: 1.0
+                                minimum: 0.0
+                                description: Upper bound on DFF times lifetime Miner damage.
+                            fatigue_design_factor:
+                                type: number
+                                default: 3.0
+                                minimum: 1.0
+                            tn_k:
+                                type: number
+                                default: 316.0
+                                minimum: 1.e-12
+                            tn_m:
+                                type: number
+                                default: 3.0
+                                minimum: 1.e-12
             openfast_failed:
                 type: object
                 default: {}

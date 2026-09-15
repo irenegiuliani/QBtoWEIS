@@ -49,6 +49,7 @@ from wisdem.inputs import load_yaml, write_yaml
 ## neccessary inputs:
 import wisdem.commonse.cross_sections as cs
 import yaml
+import fatpack
 
 from openfast_io.FAST_reader import InputReader_OpenFAST
 
@@ -103,6 +104,36 @@ class QBLADELoadCases(ExplicitComponent):
         self.n_span        = n_span    = rotorse_options['n_span']
         self.n_pc          = n_pc      = rotorse_options['n_pc']
         self.n_mooring_lines = (modopt["mooring"]["n_lines"] if modopt["flags"]["mooring"] else 0)
+
+
+        damage_constraints = self.options["opt_options"].get("constraints", {}).get("damage", {})
+        self.mooring_fatigue_options = damage_constraints.get("mooring_fatigue", {})
+        self.mooring_fatigue_active = bool(self.mooring_fatigue_options.get("flag", False))
+
+        self.mooring_fatigue_stations = tuple(
+            modopt.get("QBlade", {})
+                .get("QBladeOcean", {})
+                .get("MOO_Sensors_RelPos", [])
+        )
+
+        if self.mooring_fatigue_active:
+            if not modopt["QBlade"]["flag"]:
+                raise ValueError("Mooring fatigue requires QBlade.flag=True.")
+
+            if not modopt["flags"]["mooring"]:
+                raise ValueError("Mooring fatigue requires the mooring model.")
+
+            if modopt["QBlade"]["from_qblade"]:
+                raise ValueError( "Current mooring fatigue implementation requires from_qblade=False so that the current mooring MBL is available from WISDEM.")
+
+            if not self.mooring_fatigue_stations:
+                raise ValueError("Mooring fatigue is active but MOO_Sensors_RelPos is empty.")
+
+            stations = np.asarray(self.mooring_fatigue_stations, dtype=float)
+
+            if np.any(~np.isfinite(stations)) or np.any((stations < 0.0) | (stations > 1.0)):
+                raise ValueError("MOO_Sensors_RelPos must contain finite values between 0 and 1.")
+
 
         # Environmental Conditions needed regardless of where model comes from
         self.add_input('V_cutin',     val=0.0, units='m/s',      desc='Minimum wind speed where turbine operates (cut-in)')
@@ -444,6 +475,13 @@ class QBLADELoadCases(ExplicitComponent):
         if modopt["flags"]["mooring"]:
             self.add_output("Max_MoorLineTension", val=np.zeros(self.n_mooring_lines), units="N", desc="Maximum tension in each mooring line")
             self.add_output("moor_axial_load_ratio", val=np.zeros(self.n_mooring_lines), desc="ULS axial load utilization of each mooring line")
+            if self.mooring_fatigue_active:
+                fatigue_shape = (self.n_mooring_lines, len(self.mooring_fatigue_stations))
+                self.add_output("mooring_fatigue_load_sum", val=np.zeros(fatigue_shape), desc="Annual probability-weighted sum of rainflow tension ranges raised to tn_m; frozen load-side fatigue quantity.")
+                self.add_output("mooring_fatigue_damage", val=np.zeros(fatigue_shape), desc="Lifetime Miner damage for each mooring line and sensor station.")
+                self.add_output("mooring_fatigue_constr", val=np.zeros(fatigue_shape), desc="DFF times lifetime mooring fatigue damage.")
+
+
             
         # Fatigue output
         self.add_output('damage_blade_root_sparU',  val=0.0, desc="Miner's rule cumulative damage to upper spar cap at blade root")
@@ -479,6 +517,11 @@ class QBLADELoadCases(ExplicitComponent):
             print("[QBLADELoadCases] freeze_loads is active — returning frozen loads, skipping QBlade")
             for name, val in self._frozen_outputs.items():
                 outputs[name] = val
+            
+            # Frozen QBlade load effects, current mooring resistance.
+            if (modopt_top["flags"]["mooring"] and not modopt_top["QBlade"]["from_qblade"]):
+                outputs = self._update_mooring_constraints(inputs, outputs)      
+                
             if modopt_top.get("TowerFatigue", {}).get("flag", False):
                 if self._frozen_tower_fatigue_metadata is None:
                     raise ValueError(
@@ -2135,6 +2178,15 @@ class QBLADELoadCases(ExplicitComponent):
                 channels_out += ["NP Trans. X_g [m]", "NP Trans. Y_g [m]", "NP Trans. Z_g [m]", "NP Roll X_l [deg]", "NP Pitch Y_l [deg]", "NP Yaw Z_l [deg]"]
                 channels_out += [f'X_l Mean Tension MOO line{i+1} [N]' for i in range(self.n_mooring_lines)]
                 channels_out += [f'Abs. For. MOO line{i+1} - Floater [N]' for i in range(self.n_mooring_lines)]
+                
+                # Axial mooring forces required for fatigue analysis
+                if self.options['opt_options']['constraints']['damage']['mooring_fatigue']['flag']:
+                    moo_stations = self.qb_vt['QBladeOcean'].get('MOO_Sensors_RelPos', [])
+
+                    if not moo_stations:
+                        raise ValueError("Mooring fatigue constraint is active but MOO_Sensors_RelPos is empty.")
+
+                    channels_out += [f'X_l For. MOO line{i+1} pos {station:.3f} [N]' for i in range(self.n_mooring_lines) for station in moo_stations]
 
 
             # Sensors required for monopile post-processing
@@ -2342,12 +2394,20 @@ class QBLADELoadCases(ExplicitComponent):
                 except Exception as e:
                     logger.error(f"[MONOPILE LOADING] Error in get_monopile_loading: {e}", exc_info=True)
                     return outputs
+
             if modopt['flags']['mooring']:
                 try:
                     outputs = self.get_mooring_loading(summary_stats, inputs, outputs, modopt)
+
+                    if self.mooring_fatigue_active:
+                        outputs = self.get_mooring_fatigue_load_sum(summary_stats, chan_time, outputs, dlc_generator, failed_sim_ids)
+
+                    outputs = self._update_mooring_constraints(inputs, outputs)
+
                 except Exception as e:
-                    logger.error(f"[MOORING LOADING] Error in get_mooring_loading: {e}", exc_info=True)
-                    return outputs
+                    logger.error(f"[MOORING LOADING] Error in mooring post-processing: {e}", exc_info=True)
+                    raise
+
 
             # AEP calculation is not very robust when various simulations in an iteration fail. to avoid crashing a full optimization, we wrap it in a try/except block
             try:
@@ -2795,21 +2855,134 @@ class QBLADELoadCases(ExplicitComponent):
 
         return outputs
         
-    def get_mooring_loading(self, sum_stats, inputs, outputs, modopt):      
-        gamma = 2.4   #safety factor from https://docs.nrel.gov/docs/fy25osti/91416.pdf +20%
-        # this needs to be added to "ADDCHANNELS" input
+    def get_mooring_loading(self, sum_stats, inputs, outputs, modopt):
         for i in range(self.n_mooring_lines):
             channel = f"Abs. For. MOO line{i+1} - Floater"
 
             try:
-                outputs["Max_MoorLineTension"][i] = np.max(sum_stats[channel]["max"]) * 1000.0  #ULS maximum tension in N
-                outputs["moor_axial_load_ratio"][i] = (gamma * outputs["Max_MoorLineTension"][i] / inputs["mooring_MBL"][i])
-                
+                outputs["Max_MoorLineTension"][i] = (np.max(sum_stats[channel]["max"]) * 1000.0)
+
             except Exception as e:
-                outputs["Max_MoorLineTension"][i] = 0.0
-                outputs["moor_axial_load_ratio"][i] = 0.0
                 print(f'[WARNING] : Could not assign mooring loading for line {i+1}. Please make sure "{channel} [N]" is exported by QBlade.')
                 print("[ERROR] ", str(e))
+                raise RuntimeError(f'Missing required mooring ULS channel "{channel}"') from e
+
+        return outputs
+
+
+    def get_mooring_fatigue_load_sum(self, sum_stats, chan_time, outputs, dlc_generator, failed_sim_ids):
+        if dlc_generator is None:
+            raise ValueError("Mooring fatigue requires DLCGenerator fatigue cases.")
+
+        m = float(self.mooring_fatigue_options.get("tn_m", 3.0))
+
+        if m <= 0.0:
+            raise ValueError("Mooring fatigue tn_m must be positive.")
+
+        fatigue_case_ids = [i for i, case in enumerate(dlc_generator.cases) if case.label == "Custom" and float(case.probability) > 0.0]
+
+        if not fatigue_case_ids:
+            raise ValueError("Mooring fatigue requires at least one Custom DLC with positive probability.")
+
+        failed_set = {int(case_id) for case_id in (failed_sim_ids or [])}
+        failed_fatigue_cases = [case_id for case_id in fatigue_case_ids if case_id in failed_set]
+
+        if failed_fatigue_cases:
+            raise RuntimeError("Cannot calculate mooring fatigue because positive-probability fatigue cases failed: {failed_fatigue_cases}")
+
+        probability_sum = sum(float(dlc_generator.cases[i].probability) for i in fatigue_case_ids)
+
+        if abs(probability_sum - 1.0) > 1.0e-3:
+            logger.warning(f"Mooring fatigue Custom DLC probabilities sum to %.6f, not 1.0. The provided probability mass will be used without normalization.", probability_sum)
+
+        case_to_row = self._result_case_row_map(sum_stats, dlc_generator.n_cases, failed_sim_ids, "summary statistics table")
+
+        if len(chan_time) != len(sum_stats):
+            raise RuntimeError(f"Mooring fatigue time-series/statistics length mismatch:  chan_time={len(chan_time)}, summary_stats={len(sum_stats)}.")
+
+        seconds_per_year = 365.25 * 24.0 * 3600.0
+        load_sum = np.zeros((self.n_mooring_lines, len(self.mooring_fatigue_stations)))
+
+        for case_id in fatigue_case_ids:
+            if case_id not in case_to_row:
+                raise RuntimeError(f"Fatigue case {case_id} has no QBlade result.")
+
+            time_series = chan_time[case_to_row[case_id]]
+            probability = float(dlc_generator.cases[case_id].probability)
+            time = np.asarray(time_series["Time"], dtype=float)
+
+            if time.size < 2 or np.any(~np.isfinite(time)):
+                raise ValueError(f"Invalid time vector for fatigue case {case_id}.")
+
+            duration = float(time[-1] - time[0])
+
+            if duration <= 0.0:
+                raise ValueError(f"Non-positive duration for fatigue case {case_id}.")
+
+            annual_scale = probability * seconds_per_year / duration
+
+            for i_line in range(self.n_mooring_lines):
+                for i_station, station in enumerate(self.mooring_fatigue_stations):
+
+                    channel = (f"X_l For. MOO line{i_line+1} pos {station:.3f}")
+
+                    if channel not in time_series:
+                        raise KeyError(f'Missing QBlade mooring fatigue channel "{channel}".')
+
+                    # QBlade_wrapper already converts force channels N -> kN.
+                    tension = np.asarray(time_series[channel], dtype=float)
+
+                    if np.any(~np.isfinite(tension)):
+                        raise ValueError(f'Non-finite values in "{channel}".')
+
+                    if tension.size < 2 or np.ptp(tension) == 0.0:
+                        continue
+
+                    try:
+                        ranges = fatpack.find_rainflow_ranges(tension, k=256)
+                    except ValueError:
+                        continue
+
+                    ranges = np.asarray(ranges, dtype=float)
+                    ranges = ranges[np.isfinite(ranges) & (ranges > 0.0)]
+                    load_sum[i_line, i_station] += (annual_scale * np.sum(ranges ** m))
+
+        outputs["mooring_fatigue_load_sum"] = load_sum
+
+        return outputs
+
+    def _update_mooring_constraints(self, inputs, outputs):
+        mbl_n = np.asarray(inputs["mooring_MBL"], dtype=float)
+
+        if mbl_n.size != self.n_mooring_lines:
+            raise ValueError("mooring_MBL size does not match the number of mooring lines.")
+
+        if np.any(~np.isfinite(mbl_n)) or np.any(mbl_n <= 0.0):
+            raise ValueError("All mooring MBL values must be finite and positive.")
+
+        # Existing ULS constraint: load frozen, current resistance updated.
+        gamma = 2.4
+        outputs["moor_axial_load_ratio"] = (gamma * np.asarray(outputs["Max_MoorLineTension"]) / mbl_n)
+
+        if not self.mooring_fatigue_active:
+            return outputs
+
+        k = float(self.mooring_fatigue_options.get("tn_k", 316.0))
+        m = float(self.mooring_fatigue_options.get("tn_m", 3.0))
+        dff = float(self.mooring_fatigue_options.get("fatigue_design_factor", 3.0))
+
+        lifetime = float(np.atleast_1d(inputs["lifetime"])[0])
+
+        if k <= 0.0 or m <= 0.0 or dff <= 0.0 or lifetime <= 0.0:
+            raise ValueError("T-N parameters, DFF and design lifetime must be positive.")
+
+        # chan_time forces are stored in kN, so use MBL in kN as well.
+        mbl_kn = mbl_n * 1.0e-3
+
+        damage = (lifetime * np.asarray(outputs["mooring_fatigue_load_sum"]) / (k * mbl_kn[:, None] ** m))
+
+        outputs["mooring_fatigue_damage"] = damage
+        outputs["mooring_fatigue_constr"] = dff * damage
 
         return outputs
 

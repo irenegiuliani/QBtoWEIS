@@ -417,6 +417,18 @@ class PoseOptimizationWEIS(PoseOptimization):
                 upper=tower_fatigue_max,
             )
 
+
+        mooring_fatigue_constraint = damage_constraints.get("mooring_fatigue", {})
+        if mooring_fatigue_constraint.get("flag", False):
+            if not self.modeling.get("QBlade", {}).get("flag", False):
+                raise ValueError("Mooring fatigue constraint currently requires QBlade.")
+
+            if not self.modeling.get("flags", {}).get("mooring", False):
+                raise ValueError("Mooring fatigue constraint requires the mooring model.")
+
+            wt_opt.model.add_constraint(f"{self.floating_solve_component}.mooring_fatigue_constr", upper=mooring_fatigue_constraint.get("max", 1.0))            
+                    
+
         return wt_opt
 
 

@@ -1001,10 +1001,28 @@ class InputWriter_QBlade(object):
             f.write('\n')
 
             f.write('SUB_Sensor_Locations\n')
+
             for i in range(self.qb_vt['QBladeOcean']['NSub_Sensors']):
                 ln = []
-                ln.append(f"SUB_{str(self.qb_vt['QBladeOcean']['SUB_Sensors'][i])}_{str(self.qb_vt['QBladeOcean']['SUB_Sensors_RelPos'][i])}")
+                ln.append(
+                    f"SUB_{str(self.qb_vt['QBladeOcean']['SUB_Sensors'][i])}_"
+                    f"{str(self.qb_vt['QBladeOcean']['SUB_Sensors_RelPos'][i])}"
+                )
                 f.write(" ".join(ln) + '\n')
+
+            mooring_sensor_positions = self.qb_vt['QBladeOcean'].get('MOO_Sensors_RelPos', [])
+
+            if any(position < 0.0 or position > 1.0 for position in mooring_sensor_positions):
+                raise ValueError("QBlade mooring sensor positions must be between 0 and 1.")
+
+            for member_id in self.qb_vt['QBladeOcean']['MooID'][:self.qb_vt['QBladeOcean']['NMooMembers']]:
+                for position in mooring_sensor_positions:
+                    f.write(f'MOO_{int(member_id)}_{position:.2f}\n')
+
+
+
+
+                
 
     def write_wave_file(self):
         self.qb_vt['QBladeOcean']['lwaFile'] = os.path.join(self.QBLADE_namingOut + '.lwa')

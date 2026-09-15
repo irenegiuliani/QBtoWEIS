@@ -1448,6 +1448,13 @@ properties:
                         type: integer
                         default: 0
                         description: number of subsensors. Only modify if necessary as this is filled automatically depending on the number of flexible members!
+                    MOO_Sensors_RelPos:
+                        type: array
+                        default: []
+                        items:
+                            type: number
+                        description: Relative output sensor positions along every QBlade MOORMEMBER, from 0 (Conn1) to 1 (Conn2)            
+            
             QTurbSim: &qbturbsim
                 type: object
                 default: {}
