@@ -2058,6 +2058,7 @@ class QBLADELoadCases(ExplicitComponent):
         qblade.QBlade_dll           = os.path.join(weis_dir,path2qb_dll)
         qblade.QBLADE_runDirectory  = self.QBLADE_runDirectory
         qblade.QBLADE_namingOut     = self.QBLADE_namingOut
+        qblade.case_names           = tuple(self._qblade_case_name_to_id)
         qblade.qb_vt                = self.qb_vt
         qblade.qb_inumber           = self.qb_inumber 
         qblade.cl_devices            = modopt['General']['qblade_configuration']['cl_devices']
@@ -2652,7 +2653,7 @@ class QBLADELoadCases(ExplicitComponent):
                     pickle.dump(self._frozen_outputs, _f)
                 print(f"[QBLADELoadCases] Frozen loads saved to {frozen_loads_path}")
         else:
-            outputs = self.calculate_AEP(summary_stats, inputs, outputs, discrete_inputs)
+            outputs = self.calculate_AEP(summary_stats, inputs, outputs, discrete_inputs, dlc_generator, failed_sim_ids)
 
     def _result_case_row_map(self, result_table, n_cases, failed_sim_ids, table_name):
         """Map global QBlade case IDs to row positions in a pCrunch result table."""
@@ -2687,6 +2688,13 @@ class QBLADELoadCases(ExplicitComponent):
         modopt = self.options['modeling_options']
 
         custom_ids = [i for i, case in enumerate(dlc_generator.cases) if case.label == 'Custom'] if dlc_generator is not None else []
+
+        if dlc_generator is None:
+            if not DELs.index.equals(damage.index):
+                raise RuntimeError("DEL and damage tables do not have the same QBlade case index.")
+            legacy_U = self.qb_vt['QTurbSim']['URef'] if self.qb_vt['QSim']['WNDTYPE'] == 1 else self.qb_vt['QSim']['MEANINF']
+            case_to_row = self._result_case_row_map(DELs, len(legacy_U), failed_sim_ids, "DEL table")
+            legacy_U = np.asarray([legacy_U[case_id] for case_id in case_to_row], dtype=float)
 
         # ============================================================
         # CASE 1: Custom DLCs are present
@@ -2809,11 +2817,7 @@ class QBLADELoadCases(ExplicitComponent):
         # use QTurbSim.URef and remove failed simulations from U.
         # ============================================================
         elif self.qb_vt['QSim']['WNDTYPE'] == 1:
-            U = self.qb_vt['QTurbSim']['URef']
-
-            if failed_sim_ids:
-                indices_to_remove = [i for i in failed_sim_ids]
-                U = [u for idx, u in enumerate(U) if idx not in indices_to_remove]
+            U = legacy_U
 
             logger.warning("WARNING: Fatigue DEL/damage weighting is falling back to Weibull wind-speed probabilities because DLCGenerator is not active.")
 
@@ -2833,7 +2837,7 @@ class QBLADELoadCases(ExplicitComponent):
         # use QSim.MEANINF.
         # ============================================================
         else:
-            U = self.qb_vt['QSim']['MEANINF']
+            U = legacy_U
 
             logger.warning("WARNING: Fatigue DEL/damage weighting is falling back to Weibull wind-speed probabilities because DLCGenerator is not active.")
 

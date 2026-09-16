@@ -35,6 +35,7 @@ def qblade_sil(QBlade_dll, QBLADE_runDirectory, sim, channels, store_qprs, out_f
 
     QBLIB = QBladeLibrary(QBlade_dll)
 
+    success = False
     for attempt in range(max_retries):
         if QBLIB.createInstance(cl_device, cl_group_size):
             success = True
@@ -54,10 +55,9 @@ def qblade_sil(QBlade_dll, QBLADE_runDirectory, sim, channels, store_qprs, out_f
     simulation_success = QBLIB.runFullSimulation()
     
     if not simulation_success:
-        log_failed_simulation(sim_name, qb_inumber, QBLADE_runDirectory)
         raise RuntimeError(f"Simulation {sim} failed.")  
     
-    sim_out_name = sim_name.strip('.sim')
+    sim_out_name = os.path.splitext(sim_name)[0]
     
     # TODO: allow for out AND oub
     if out_file_format == 2 and simulation_success: # 2 --> binary:
@@ -101,10 +101,10 @@ def run_qblade_sil(QBlade_dll, QBLADE_runDirectory, channels, number_of_workers,
         # A NEW ProcessPoolExecutor is created for every batch
         with concurrent.futures.ProcessPoolExecutor(max_workers=min(number_of_workers, len(batch))) as executor:
 
-            futures = []
+            futures = {}
 
             for sim, cl_device in batch:
-                futures.append(
+                futures[
                     executor.submit(
                         qblade_sil,
                         QBlade_dll,
@@ -117,7 +117,7 @@ def run_qblade_sil(QBlade_dll, QBLADE_runDirectory, channels, number_of_workers,
                         cl_device,
                         cl_group_size
                     )
-                )
+                ] = sim
 
                 time.sleep(0.25)  # Optional: prevent overloading
 
@@ -126,6 +126,11 @@ def run_qblade_sil(QBlade_dll, QBLADE_runDirectory, channels, number_of_workers,
                 try:
                     future.result()
                 except Exception as e:
+                    sim_name = os.path.basename(futures[future])
+                    log_failed_simulation(sim_name, qb_inumber, QBLADE_runDirectory)
+                    output_file = os.path.join(QBLADE_runDirectory, os.path.splitext(sim_name)[0] + '_completed.outb')
+                    if os.path.exists(output_file):
+                        os.remove(output_file)
                     print(f"Simulation failed with exception: {e}")
 
         # Here the executor has been shut down and its worker processes are gone
