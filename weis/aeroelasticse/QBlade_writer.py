@@ -1017,7 +1017,7 @@ class InputWriter_QBlade(object):
 
             for member_id in self.qb_vt['QBladeOcean']['MooID'][:self.qb_vt['QBladeOcean']['NMooMembers']]:
                 for position in mooring_sensor_positions:
-                    f.write(f'MOO_{int(member_id)}_{position:.2f}\n')
+                    f.write(f'MOO_{int(member_id)}_{position:.3f}\n')
 
 
 

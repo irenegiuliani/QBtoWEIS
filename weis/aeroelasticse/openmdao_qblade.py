@@ -109,6 +109,19 @@ class QBLADELoadCases(ExplicitComponent):
         damage_constraints = self.options["opt_options"].get("constraints", {}).get("damage", {})
         self.mooring_fatigue_options = damage_constraints.get("mooring_fatigue", {})
         self.mooring_fatigue_active = bool(self.mooring_fatigue_options.get("flag", False))
+        self.tower_fatigue_active = bool(modopt.get("TowerFatigue", {}).get("flag", False))
+        self.fatigue_requested = self.tower_fatigue_active or self.mooring_fatigue_active
+        self._qblade_case_name_to_id = {}
+        self._qblade_result_names = ()
+        self._fatigue_case_ids = ()
+        self._uls_case_ids = ()
+
+        if self.fatigue_requested:
+            configured_dlc_labels = [str(dlc.get("DLC")) for dlc in modopt.get("DLC_driver", {}).get("DLCs", [])]
+            if (not modopt["QBlade"]["simulation"].get("DLCGenerator", False) or "Custom" not in configured_dlc_labels):
+                raise ValueError(f"Tower or mooring fatigue requires DLCGenerator=True and at least one Custom DLC. Configured DLCs: {configured_dlc_labels}")
+            if modopt["QBlade"]["Turbine"].get("NOSTRUCTURE", False):
+                raise ValueError("Tower or mooring fatigue requires QBlade structural outputs; NOSTRUCTURE must be False.")
 
         self.mooring_fatigue_stations = tuple(
             modopt.get("QBlade", {})
@@ -578,6 +591,110 @@ class QBLADELoadCases(ExplicitComponent):
             self.post_process(summary_stats, extreme_table, DELs, Damage, chan_time, inputs, outputs, discrete_inputs, dlc_generator, discrete_outputs)
 
             self.qb_inumber += 1
+
+    def _select_dlc_cases(self, dlc_generator):
+        """Select fatigue and ULS cases from the configured DLC population.
+
+        Custom cases are the lifetime fatigue population. If any non-Custom
+        DLCs are configured, they are the ULS population; otherwise Custom
+        cases are also used for ULS. Selection is based on configured cases,
+        never on which simulations happened to succeed.
+        """
+        if dlc_generator is None:
+            if self.fatigue_requested:
+                raise ValueError("Tower or mooring fatigue requires Custom DLC cases.")
+
+            self._fatigue_case_ids = ()
+            self._uls_case_ids = ()
+            return
+
+        self._fatigue_case_ids = tuple(i for i, case in enumerate(dlc_generator.cases) if case.label == "Custom")
+        non_custom_case_ids = tuple(i for i, case in enumerate(dlc_generator.cases) if case.label != "Custom")
+
+        # If non-Custom DLCs exist, they are used for ULS.
+        # Otherwise Custom cases are also used for ULS.
+        self._uls_case_ids = (non_custom_case_ids or self._fatigue_case_ids)
+
+        if self.fatigue_requested and not self._fatigue_case_ids:
+            raise ValueError("Tower or mooring fatigue requires at least one Custom DLC.")
+
+        # Custom probabilities are also consumed by the generic DEL/damage
+        # and, when applicable, AEP post-processing. Validate every Custom
+        # probability without modifying or normalizing the supplied weights.
+        for case_id in self._fatigue_case_ids:
+            probability = float(dlc_generator.cases[case_id].probability)
+
+            if not np.isfinite(probability) or probability < 0.0:
+                raise ValueError(f"Custom DLC case {case_id} probability must be finite and non-negative; got {probability!r}.")
+
+              
+    def _register_qblade_cases(self, case_names):
+        """Register the full QBlade case name against its global case ID."""
+        if not case_names or len(set(case_names)) != len(case_names):
+            raise ValueError("QBlade case names must be non-empty and unique.")
+        self._qblade_case_name_to_id = {str(case_name): case_id for case_id, case_name in enumerate(case_names)}
+
+    def _qblade_case_id(self, label):
+        """Resolve a .sim/.out/.outb/result label to the global QBlade case ID."""
+        name = str(label).replace("\\", "/").rsplit("/", 1)[-1]
+        if name.endswith(".sim"):
+            name = name[:-4]
+        else:
+            for suffix in (".outb", ".out"):
+                if name.endswith(suffix):
+                    name = name[:-len(suffix)]
+                    break
+            if name.endswith("_completed"):
+                name = name[:-10]
+
+        if name not in self._qblade_case_name_to_id:
+            raise RuntimeError(f"Unknown QBlade case {label!r}; cannot associate it with a global DLC ID.")
+        return self._qblade_case_name_to_id[name]
+
+    def _timeseries_case_row_map(self, chan_time, n_cases, failed_sim_ids):
+        """Map global case IDs to rows in chan_time using wrapper result names."""
+        if len(self._qblade_result_names) != len(chan_time):
+            raise RuntimeError(f"QBlade time-series/name count mismatch: names={len(self._qblade_result_names)}, time_series={len(chan_time)}.")
+
+        case_ids = [self._qblade_case_id(name) for name in self._qblade_result_names]
+        if len(set(case_ids)) != len(case_ids):
+            raise RuntimeError(f"Duplicated QBlade time-series case IDs: {case_ids}")
+        invalid = [case_id for case_id in case_ids if case_id < 0 or case_id >= n_cases]
+        if invalid:
+            raise RuntimeError(f"QBlade time-series case IDs outside [0, {n_cases - 1}]: {invalid}")
+
+        failed_set = set(int(case_id) for case_id in (failed_sim_ids or []))
+        returned_failed = sorted(failed_set.intersection(case_ids))
+        if returned_failed:
+            raise RuntimeError(f"QBlade returned time series for cases marked failed: {returned_failed}.")
+
+        return {case_id: row_position for row_position, case_id in enumerate(case_ids)}
+
+    def _prepare_uls_results(self, summary_stats, extreme_table, dlc_generator, failed_sim_ids):
+        """Return ULS views only when structural tower/mooring loads are used."""
+        flags = self.options["modeling_options"]["flags"]
+        if (dlc_generator is None or self.qb_vt["Turbine"]["NOSTRUCTURE"] or not (flags.get("tower", False) or flags.get("mooring", False))):
+            return summary_stats, extreme_table
+
+        self._select_dlc_cases(dlc_generator)
+        case_to_row = self._result_case_row_map(summary_stats, dlc_generator.n_cases, failed_sim_ids, "summary statistics table")
+
+        # Only tower/mooring ULS use this filtered population.  If one of their
+        # configured ULS cases is missing, do not silently fall back to Custom.
+        missing_uls = [case_id for case_id in self._uls_case_ids if case_id not in case_to_row]
+        if missing_uls:
+            raise RuntimeError(f"Required ULS QBlade cases are missing: {missing_uls}. No fallback to a different DLC population is allowed.")
+
+        rows = [case_to_row[case_id] for case_id in self._uls_case_ids]
+        if not rows:
+            raise RuntimeError("No QBlade cases are available for tower/mooring ULS evaluation.")
+        if any(len(events) != len(summary_stats) for events in extreme_table.values()):
+            raise RuntimeError("QBlade extreme events are not aligned with summary statistics.")
+
+        uls_summary_stats = summary_stats.iloc[rows].copy()
+        uls_extreme_table = {channel: [events[row] for row in rows] for channel, events in extreme_table.items()}
+        
+        return uls_summary_stats, uls_extreme_table
 
     def _coerce_hydro_pair(self, raw_value, field_name, member_name):
         if isinstance(raw_value, np.ndarray):
@@ -1819,6 +1936,8 @@ class QBLADELoadCases(ExplicitComponent):
             for i_DLC in range(len(DLCs)):
                 DLCopt = DLCs[i_DLC]
                 dlc_generator.generate(DLCopt['DLC'], DLCopt)
+
+            self._select_dlc_cases(dlc_generator)
             
             # Initialize parametric inputs
             WindFile_type = np.zeros(dlc_generator.n_cases, dtype=int)
@@ -1901,11 +2020,16 @@ class QBLADELoadCases(ExplicitComponent):
             self.TStart = [c.transient_time for c in dlc_generator.cases]
             dlc_label = [c.label for c in dlc_generator.cases]
             
+            if len(case_name) != dlc_generator.n_cases:
+                raise RuntimeError(f"Generated {len(case_name)} QBlade case names for {dlc_generator.n_cases} global DLC cases.")
+            self._register_qblade_cases(case_name)
+
             # Merge various cases into single case matrix
             case_df = pd.DataFrame(case_list)
             case_df.index = case_name
-            # Add case name and dlc label to front for readability
+            # Add case name, global ID and dlc label to front for readability
             case_df.insert(0,'DLC',dlc_label)
+            case_df.insert(0,'global_case_id',np.arange(dlc_generator.n_cases))
             case_df.insert(0,'case_name',case_name)
             text_table = case_df.to_string(index=False)
 
@@ -2060,6 +2184,9 @@ class QBLADELoadCases(ExplicitComponent):
             self.magnitude_channels = magnitude_channels
 
         summary_stats, extreme_table, DELs, Damage, chan_time = qblade.run_qblade_cases()
+        self._qblade_result_names = tuple(qblade.result_names)
+        if len(self._qblade_result_names) != len(chan_time):
+            raise RuntimeError("QBlade wrapper returned inconsistent result-name/time-series counts.")
 
         return summary_stats, extreme_table, DELs, Damage, chan_time, dlc_generator
 
@@ -2180,7 +2307,7 @@ class QBLADELoadCases(ExplicitComponent):
                 channels_out += [f'Abs. For. MOO line{i+1} - Floater [N]' for i in range(self.n_mooring_lines)]
                 
                 # Axial mooring forces required for fatigue analysis
-                if self.options['opt_options']['constraints']['damage']['mooring_fatigue']['flag']:
+                if self.mooring_fatigue_active:
                     moo_stations = self.qb_vt['QBladeOcean'].get('MOO_Sensors_RelPos', [])
 
                     if not moo_stations:
@@ -2248,6 +2375,9 @@ class QBLADELoadCases(ExplicitComponent):
             cases = len(qb_vt['QSim']['MEANINF'])
             module = 'QSim'
             wind_ref = 'MEANINF'
+
+        case_names = [self.QBLADE_namingOut + f'_{idx}' for idx in range(cases)]
+        self._register_qblade_cases(case_names)
         
         for idx in range(cases):
             i_qb_vt[module][wind_ref]          = float(qb_vt[module][wind_ref][idx])
@@ -2269,11 +2399,11 @@ class QBLADELoadCases(ExplicitComponent):
             QBLADE_namingOut_appendix = f'_{idx}'
             writer.qb_vt = i_qb_vt
             writer.QBLADE_runDirectory  = self.QBLADE_runDirectory
-            writer.QBLADE_namingOut     = self.QBLADE_namingOut + QBLADE_namingOut_appendix
+            writer.QBLADE_namingOut     = case_names[idx]
 
             if idx == (cases-1) and modopt['General']['qblade_configuration']['store_turbines']:
                 self.qb_vt_stored = i_qb_vt
-                self.QBLADE_namingOut_stored = self.QBLADE_namingOut + QBLADE_namingOut_appendix
+                self.QBLADE_namingOut_stored = case_names[idx]
 
             writer.execute()
 
@@ -2381,13 +2511,15 @@ class QBLADELoadCases(ExplicitComponent):
             outputs['qblade_failed'] = 2
         else:
             outputs['qblade_failed'] = 0
+
+        uls_summary_stats, uls_extreme_table = self._prepare_uls_results(summary_stats, extreme_table, dlc_generator, failed_sim_ids)
         
         if not self.qb_vt['Turbine']['NOSTRUCTURE']:
             if self.options['modeling_options']['flags']['blade']:
                 outputs = self.get_blade_loading(summary_stats, extreme_table, inputs, outputs)
                 outputs = self.get_rotor_loading(summary_stats, outputs)
             if self.options['modeling_options']['flags']['tower']:
-                outputs = self.get_tower_loading(summary_stats, extreme_table, inputs, outputs)
+                outputs = self.get_tower_loading(uls_summary_stats, uls_extreme_table, inputs, outputs)
             if modopt['flags']['monopile']:
                 try:
                     outputs = self.get_monopile_loading(summary_stats, extreme_table, inputs, outputs)
@@ -2397,7 +2529,7 @@ class QBLADELoadCases(ExplicitComponent):
 
             if modopt['flags']['mooring']:
                 try:
-                    outputs = self.get_mooring_loading(summary_stats, inputs, outputs, modopt)
+                    outputs = self.get_mooring_loading(uls_summary_stats, inputs, outputs, modopt)
 
                     if self.mooring_fatigue_active:
                         outputs = self.get_mooring_fatigue_load_sum(summary_stats, chan_time, outputs, dlc_generator, failed_sim_ids)
@@ -2446,41 +2578,29 @@ class QBLADELoadCases(ExplicitComponent):
                     'timeseries',
                 )
 
-                # Determine total case count (same logic as save_timeseries)
-                if self.qb_vt['QSim']['DLCGenerator']:
-                    _n_cases = dlc_generator.n_cases
-                elif self.qb_vt['QSim']['WNDTYPE'] == 1:
-                    _n_cases = len(self.qb_vt['QTurbSim']['URef'])
-                else:
-                    _n_cases = len(self.qb_vt['QSim']['MEANINF'])
+                if dlc_generator is None:
+                    raise ValueError("TowerFatigue requires DLCGenerator Custom cases.")
+                self._select_dlc_cases(dlc_generator)
 
-                _failed_set = set(failed_sim_ids or [])
+                _fatigue_ids = [
+                    case_id for case_id in self._fatigue_case_ids
+                    if float(dlc_generator.cases[case_id].probability) > 0.0
+                ]
+                if not _fatigue_ids:
+                    raise ValueError("TowerFatigue requires at least one Custom DLC with positive probability.")
 
-                # Case probabilities — Custom DLC path only; no Weibull fallback.
-                # Non-Custom or non-DLC cases receive probability 0.0 and are
-                # skipped by TowerFatiguePostFrame before any file I/O.
-                if dlc_generator is not None:
-                    _custom_prob = {
-                        i: float(c.probability)
-                        for i, c in enumerate(dlc_generator.cases)
-                        if c.label == 'Custom'
-                    }
-                else:
-                    _custom_prob = {}
+                _failed_set = set(int(case_id) for case_id in (failed_sim_ids or []))
+                _failed_fatigue = [case_id for case_id in _fatigue_ids if case_id in _failed_set]
+                if _failed_fatigue:
+                    raise RuntimeError(f"Cannot calculate tower fatigue because positive-probability Custom cases failed: {_failed_fatigue}")
 
-                _case_names = []
-                _case_prob  = []
-                _case_files = []
+                _case_names = [self.QBLADE_namingOut + '_' + str(case_id) for case_id in _fatigue_ids]
+                _case_prob = [float(dlc_generator.cases[case_id].probability) for case_id in _fatigue_ids]
+                _case_files = [name + '.parquet' for name in _case_names]
 
-                for _i in range(_n_cases):
-                    _case_names.append(self.QBLADE_namingOut + '_' + str(_i))
-                    if _i in _failed_set:
-                        # Failed: zero probability → TowerFatiguePostFrame skips
-                        _case_prob.append(0.0)
-                        _case_files.append("")
-                    else:
-                        _case_prob.append(_custom_prob.get(_i, 0.0))
-                        _case_files.append(self.QBLADE_namingOut + '_' + str(_i) + '.parquet')
+                _missing_files = [file_name for file_name in _case_files if not os.path.isfile(os.path.join(ts_dir, file_name))]
+                if _missing_files:
+                    raise RuntimeError(f"Tower fatigue time-series files are missing: {_missing_files}")
 
                 if not (len(_case_names) == len(_case_prob) == len(_case_files)):
                     raise RuntimeError(
@@ -2495,7 +2615,7 @@ class QBLADELoadCases(ExplicitComponent):
                 if np.sum(_case_prob) <= 0.0:
                     raise ValueError(
                         "TowerFatigue is active, but the sum of tower fatigue case probabilities "
-                        "is zero. At least one non-failed QBlade case must have a positive Custom "
+                        "is zero. At least one Custom QBlade case must have a positive "
                         "probability; otherwise fatigue_damage and constr_fatigue would be "
                         "incorrectly returned as zero."
                     )
@@ -2535,44 +2655,28 @@ class QBLADELoadCases(ExplicitComponent):
             outputs = self.calculate_AEP(summary_stats, inputs, outputs, discrete_inputs)
 
     def _result_case_row_map(self, result_table, n_cases, failed_sim_ids, table_name):
-        """Map original DLC case IDs to row positions in a pCrunch result table."""
+        """Map global QBlade case IDs to row positions in a pCrunch result table."""
         if result_table is None:
             raise RuntimeError(f"{table_name} is None")
 
-        # pCrunch uses the analyzed output filename as the DataFrame row label.
-        parsed_case_ids = []
-        for label in result_table.index:
-            match = re.search(r'_(\d+)_completed(?:\.(?:outb|out))?$', str(label))
-            if match is None:
-                parsed_case_ids = []
-                break
-            parsed_case_ids.append(int(match.group(1)))
+        if not self._qblade_case_name_to_id:
+            raise RuntimeError(f"{table_name} cannot be mapped without registered QBlade case names.")
 
-        if parsed_case_ids:
-            if len(set(parsed_case_ids)) != len(parsed_case_ids):
-                raise RuntimeError(f"{table_name} contains duplicated QBlade case IDs: {parsed_case_ids}")
+        # Table rows may be reordered independently of the wrapper time series.
+        # A matching row count or RangeIndex does not establish case identity.
+        # Unknown labels must fail, never fall back to a positional association.
+        result_case_ids = [self._qblade_case_id(label) for label in result_table.index]
 
-            invalid = [case_id for case_id in parsed_case_ids if case_id < 0 or case_id >= n_cases]
-            if invalid:
-                raise RuntimeError(
-                    f"{table_name} contains case IDs outside [0, {n_cases - 1}]: {invalid}"
-                )
-            result_case_ids = parsed_case_ids
-        else:
-            # Fallback for pCrunch versions returning a RangeIndex.
-            failed_set = {
-                int(case_id)
-                for case_id in (failed_sim_ids or [])
-                if 0 <= int(case_id) < n_cases
-            }
-            result_case_ids = [case_id for case_id in range(n_cases) if case_id not in failed_set]
+        if len(set(result_case_ids)) != len(result_case_ids):
+            raise RuntimeError(f"{table_name} contains duplicated QBlade case IDs: {result_case_ids}")
+        invalid = [case_id for case_id in result_case_ids if case_id < 0 or case_id >= n_cases]
+        if invalid:
+            raise RuntimeError(f"{table_name} contains case IDs outside [0, {n_cases - 1}]: {invalid}")
 
-            if len(result_case_ids) != len(result_table):
-                raise RuntimeError(
-                    f"{table_name} has {len(result_table)} rows, but the failure log "
-                    f"implies {len(result_case_ids)} successful cases out of {n_cases}. "
-                    "The failure log and the actual QBlade output files are inconsistent."
-                )
+        failed_set = set(int(case_id) for case_id in (failed_sim_ids or []))
+        returned_failed = sorted(failed_set.intersection(result_case_ids))
+        if returned_failed:
+            raise RuntimeError(f"{table_name} contains results for cases marked failed: {returned_failed}.")
 
         return {
             case_id: row_position
@@ -2581,96 +2685,182 @@ class QBLADELoadCases(ExplicitComponent):
 
     def get_weighted_DELs(self, DELs, damage, discrete_inputs, outputs, dlc_generator, failed_sim_ids):
         modopt = self.options['modeling_options']
-        custom_ids = [i for i, c in enumerate(dlc_generator.cases) if c.label == 'Custom'] if dlc_generator is not None else []
 
+        custom_ids = [i for i, case in enumerate(dlc_generator.cases) if case.label == 'Custom'] if dlc_generator is not None else []
+
+        # ============================================================
+        # CASE 1: Custom DLCs are present
+        #
+        # Use the explicit case-level probabilities associated with the
+        # Custom lifetime population. Do not reconstruct them from URef
+        # and do not renormalize them.
+        # ============================================================
         if custom_ids:
-            case_prob_all = np.array([dlc_generator.cases[i].probability for i in custom_ids])
+            case_prob_all = np.asarray([dlc_generator.cases[i].probability for i in custom_ids], dtype=float)
+
+            if not np.all(np.isfinite(case_prob_all)) or np.any(case_prob_all < 0.0):
+                raise RuntimeError("Custom DLC case probabilities must be finite and non-negative.")
+
             prob_sum = np.sum(case_prob_all)
-            if len(case_prob_all) == 0 or prob_sum <= 0.0:
-                raise Exception('Custom DLC case probabilities must be defined with a positive sum before fatigue weighting')
+
+            if prob_sum <= 0.0:
+                raise RuntimeError("Custom DLC case probabilities must have a positive sum before fatigue weighting.")
+
             if abs(prob_sum - 1.0) > 1.e-3:
-                logger.warning(f'WARNING: Custom DLC case probabilities sum to {prob_sum:.6f}, not 1.0. Fatigue DEL/damage weighting will use the provided partial probability mass.')
+                logger.warning(f"WARNING: Custom DLC case probabilities sum to {prob_sum:.6f}, not 1.0. Fatigue DEL/damage weighting will use the provided probability mass without normalization.")
 
             failed_sim_ids = failed_sim_ids or []
 
             if len(DELs) != len(damage):
-                raise RuntimeError(
-                    f"DEL/damage row mismatch: DELs={len(DELs)}, damage={len(damage)}"
-                )
+                raise RuntimeError(f"DEL/damage row mismatch: DELs={len(DELs)}, damage={len(damage)}")
+
             if not DELs.index.equals(damage.index):
-                raise RuntimeError("DEL and damage tables do not have the same QBlade case index")
+                raise RuntimeError("DEL and damage tables do not have the same QBlade case index.")
 
-            case_to_row = self._result_case_row_map(
-                DELs,
-                dlc_generator.n_cases,
-                failed_sim_ids,
-                "DEL table",
-            )
+            case_to_row = self._result_case_row_map(DELs, dlc_generator.n_cases, failed_sim_ids, "DEL table")
 
-            # active_ids are original DLC IDs; active_rows are compressed pCrunch rows.
-            active_ids = [case_id for case_id in custom_ids if case_id in case_to_row]
-            active_rows = [case_to_row[case_id] for case_id in active_ids]
+            # A missing positive-probability Custom case would make the
+            # lifetime fatigue population incomplete. Do not silently
+            # discard it and do not renormalize the remaining population.
+            missing_positive_custom = [case_id for case_id in custom_ids if float(dlc_generator.cases[case_id].probability) > 0.0 and case_id not in case_to_row]
+
+            if missing_positive_custom:
+                raise RuntimeError(f"Cannot calculate Custom DEL/damage weighting because positive-probability Custom cases are missing: {missing_positive_custom}")
+
+            # Custom cases with probability == 0 do not contribute to
+            # fatigue and therefore do not need to enter the aggregation.
+            active_ids = [case_id for case_id in custom_ids if case_id in case_to_row and float(dlc_generator.cases[case_id].probability) > 0.0]
 
             if not active_ids:
-                raise RuntimeError("No successful Custom DLC cases are available for fatigue weighting")
+                raise RuntimeError("No positive-probability Custom DLC cases are available for fatigue weighting.")
 
-            U = np.array([dlc_generator.cases[i].URef for i in active_ids])
+            active_rows = [case_to_row[case_id] for case_id in active_ids]
+
             DELs = DELs.iloc[active_rows].copy().reset_index(drop=True)
             damage = damage.iloc[active_rows].copy().reset_index(drop=True)
 
-            # Preserve joint-state weighting from the Custom lookup table at case level.
-            ws_prob = np.array([dlc_generator.cases[i].probability for i in active_ids])
-            active_prob_sum = np.sum(ws_prob)
-            if active_prob_sum <= 0.0:
-                raise Exception('All Custom DLC probability mass was lost after filtering failed simulations')
-            if active_prob_sum < prob_sum - 1.e-12:
-                logger.warning(
-                    f'WARNING: Failed Custom DLC simulations removed probability mass of {prob_sum - active_prob_sum:.6f}. '
-                    f'Fatigue DEL/damage weighting will use the remaining probability mass ({active_prob_sum:.6f}).'
-                )
+            # Preserve exactly the Custom joint-state probabilities.
+            ws_prob = np.asarray([dlc_generator.cases[case_id].probability for case_id in active_ids], dtype=float)
 
-        elif self.qb_vt['QSim']['WNDTYPE'] == 1 or self.qb_vt['QSim']['DLCGenerator']:
-            U = self.qb_vt['QTurbSim']['URef']    
-            
-            # remove failed simulations from the list of cases to analyze
+        # ============================================================
+        # CASE 2: DLCGenerator is active, but there are NO Custom DLCs
+        #
+        # Preserve the dev-tst benchmark policy:
+        #
+        # - if DLC 1.2 / 6.4 / 7.2 are present, use only those;
+        # - otherwise use all generated DLC cases;
+        # - use one URef for every actual generated case;
+        # - calculate Weibull weights and normalize them.
+        #
+        # The only change with respect to the historical benchmark is
+        # that pCrunch rows are selected using explicit case identity,
+        # rather than assuming row number == global DLC case ID.
+        # ============================================================
+        elif dlc_generator is not None:
+            failed_sim_ids = failed_sim_ids or []
+
+            if len(DELs) != len(damage):
+                raise RuntimeError(f"DEL/damage row mismatch: DELs={len(DELs)}, damage={len(damage)}")
+
+            if not DELs.index.equals(damage.index):
+                raise RuntimeError("DEL and damage tables do not have the same QBlade case index.")
+
+            case_to_row = self._result_case_row_map(DELs, dlc_generator.n_cases, failed_sim_ids, "DEL table")
+
+            # Same standard fatigue-DLC selection used by dev-tst.
+            standard_fatigue_ids = [i for i, case in enumerate(dlc_generator.cases) if case.label in ['1.2', '6.4', '7.2']]
+
+            if standard_fatigue_ids:
+                selected_ids = standard_fatigue_ids
+            else:
+                selected_ids = list(range(dlc_generator.n_cases))
+
+            # Only successfully returned pCrunch cases can be included.
+            active_ids = [case_id for case_id in selected_ids if case_id in case_to_row]
+
+            if not active_ids:
+                raise RuntimeError("No successful DLC cases are available for DEL/damage weighting.")
+
+            active_rows = [case_to_row[case_id] for case_id in active_ids]
+
+            DELs = DELs.iloc[active_rows].copy().reset_index(drop=True)
+            damage = damage.iloc[active_rows].copy().reset_index(drop=True)
+
+            # One URef for every actual generated DLC case.
+            # Repeated seeds therefore give repeated URef entries,
+            # reproducing the historical dev-tst behaviour.
+            U = np.asarray([dlc_generator.cases[case_id].URef for case_id in active_ids], dtype=float)
+
+            logger.warning("WARNING: No Custom DLC probabilities are available. Fatigue DEL/damage weighting is using Weibull wind-speed probabilities following the dev-tst policy.")
+
+            pp = PowerProduction(discrete_inputs['turbine_class'])
+            ws_prob = np.asarray(pp.prob_WindDist(U, disttype='pdf'), dtype=float)
+            prob_sum = np.sum(ws_prob)
+
+            if len(ws_prob) == 0 or not np.all(np.isfinite(ws_prob)) or prob_sum <= 0.0:
+                raise RuntimeError("Invalid Weibull probabilities for DEL/damage weighting.")
+
+            ws_prob /= prob_sum
+
+        # ============================================================
+        # CASE 3: no DLCGenerator, TurbSim wind
+        #
+        # Preserve the previous QBtoWEIS behaviour:
+        # use QTurbSim.URef and remove failed simulations from U.
+        # ============================================================
+        elif self.qb_vt['QSim']['WNDTYPE'] == 1:
+            U = self.qb_vt['QTurbSim']['URef']
+
             if failed_sim_ids:
                 indices_to_remove = [i for i in failed_sim_ids]
                 U = [u for idx, u in enumerate(U) if idx not in indices_to_remove]
 
-            logger.warning('WARNING: Fatigue DEL/damage weighting is falling back to Weibull wind-speed probabilities because valid case-level Custom DLC probabilities were not available.')
+            logger.warning("WARNING: Fatigue DEL/damage weighting is falling back to Weibull wind-speed probabilities because DLCGenerator is not active.")
 
-            # Get wind distribution probabilities, make sure they are normalized
             pp = PowerProduction(discrete_inputs['turbine_class'])
-            ws_prob = pp.prob_WindDist(U, disttype='pdf')
-            # print("Wind speeds and corresponding probabilities, wind speeds: ", np.unique(U), "probablities: ", np.unique(ws_prob))
-            ws_prob /= ws_prob.sum()
+            ws_prob = np.asarray(pp.prob_WindDist(U, disttype='pdf'), dtype=float)
+            prob_sum = np.sum(ws_prob)
+
+            if len(ws_prob) == 0 or not np.all(np.isfinite(ws_prob)) or prob_sum <= 0.0:
+                raise RuntimeError("Invalid Weibull probabilities for DEL/damage weighting.")
+
+            ws_prob /= prob_sum
+
+        # ============================================================
+        # CASE 4: no DLCGenerator and non-TurbSim wind
+        #
+        # Preserve the previous QBtoWEIS behaviour:
+        # use QSim.MEANINF.
+        # ============================================================
         else:
             U = self.qb_vt['QSim']['MEANINF']
 
-            logger.warning('WARNING: Fatigue DEL/damage weighting is falling back to Weibull wind-speed probabilities because valid case-level Custom DLC probabilities were not available.')
+            logger.warning("WARNING: Fatigue DEL/damage weighting is falling back to Weibull wind-speed probabilities because DLCGenerator is not active.")
 
-            # Get wind distribution probabilities, make sure they are normalized
             pp = PowerProduction(discrete_inputs['turbine_class'])
-            ws_prob = pp.prob_WindDist(U, disttype='pdf')
-            # print("Wind speeds and corresponding probabilities, wind speeds: ", np.unique(U), "probablities: ", np.unique(ws_prob))
-            ws_prob /= ws_prob.sum()
-        
-        
+            ws_prob = np.asarray(pp.prob_WindDist(U, disttype='pdf'), dtype=float)
+            prob_sum = np.sum(ws_prob)
+
+            if len(ws_prob) == 0 or not np.all(np.isfinite(ws_prob)) or prob_sum <= 0.0:
+                raise RuntimeError("Invalid Weibull probabilities for DEL/damage weighting.")
+
+            ws_prob /= prob_sum
+
+        # ============================================================
+        # COMMON WEIGHTING
+        # ============================================================
         DELs = DELs.reset_index(drop=True)
         damage = damage.reset_index(drop=True)
         ws_prob = np.asarray(ws_prob, dtype=float)
 
         if len(DELs) != len(ws_prob) or len(damage) != len(ws_prob):
-            raise RuntimeError(
-                "Fatigue weighting length mismatch after failed-case filtering: "
-                f"DELs={len(DELs)}, damage={len(damage)}, probabilities={len(ws_prob)}"
-            )
+            raise RuntimeError(f"Fatigue weighting length mismatch after case filtering: DELs={len(DELs)}, damage={len(damage)}, probabilities={len(ws_prob)}")
 
-        # Scale all DELs and damage by probability and collapse over the various DLCs (inner dot product)
-        # Also work around NaNs
+        # Scale all DELs and damage by probability and collapse over
+        # the various DLCs. Also work around NaNs.
         DELs = DELs.fillna(0.0).multiply(ws_prob, axis=0).sum()
         damage = damage.fillna(0.0).multiply(ws_prob, axis=0).sum()
-        
+
         # Standard DELs for blade root and tower base
         outputs['DEL_RootMyb'] = np.max([DELs[f'Y_b RootBend. Mom. BLD_{k+1}'] for k in range(self.n_blades)])
         outputs['DEL_RootMxb'] = np.max([DELs[f'X_b RootBend. Mom. BLD_{k+1}'] for k in range(self.n_blades)])
@@ -2679,49 +2869,47 @@ class QBLADELoadCases(ExplicitComponent):
         outputs['DEL_XtbMom'] = DELs['XtbMom']
         outputs['DEL_YtbMom'] = DELs['YtbMom']
         outputs['DEL_ZtbMom'] = DELs['ZtbMom']
-        outputs['DEL_TwrBsMyt_ratio'] = DELs['TwrBsM']/self.options['opt_options']['constraints']['control']['DEL_TwrBsMyt']['max']
-            
-        # Compute total fatigue damage in spar caps at blade root and trailing edge at max chord location
-        if not modopt['QBlade']['from_qblade']:
-            for k in range(1,self.n_blades+1):
-                for u in ['U','L']:
-                    damage[f'BladeRootSpar{u}_Axial{k}'] = (damage[f'RootSpar{u}_Fzb{k}'] +
-                                                        damage[f'RootSpar{u}_Mxb{k}'] +
-                                                        damage[f'RootSpar{u}_Myb{k}'])
-                    damage[f'BladeMaxcTE{u}_Axial{k}'] = (damage[f'Spn2te{u}_FLzb{k}'] +
-                                                        damage[f'Spn2te{u}_MLxb{k}'] +
-                                                        damage[f'Spn2te{u}_MLyb{k}'])
+        outputs['DEL_TwrBsMyt_ratio'] = DELs['TwrBsM'] / self.options['opt_options']['constraints']['control']['DEL_TwrBsMyt']['max']
 
-            # Compute total fatigue damage in low speed shaft, tower base, monopile base
+        # Compute total fatigue damage in spar caps at blade root and
+        # trailing edge at maximum chord location.
+        if not modopt['QBlade']['from_qblade']:
+            for k in range(1, self.n_blades + 1):
+                for u in ['U', 'L']:
+                    damage[f'BladeRootSpar{u}_Axial{k}'] = damage[f'RootSpar{u}_Fzb{k}'] + damage[f'RootSpar{u}_Mxb{k}'] + damage[f'RootSpar{u}_Myb{k}']
+                    damage[f'BladeMaxcTE{u}_Axial{k}'] = damage[f'Spn2te{u}_FLzb{k}'] + damage[f'Spn2te{u}_MLxb{k}'] + damage[f'Spn2te{u}_MLyb{k}']
+
+            # Compute total fatigue damage in low speed shaft,
+            # tower base and monopile base.
             damage['LSSAxial'] = 0.0
             damage['LSSShear'] = 0.0
             damage['TowerBaseAxial'] = 0.0
             damage['TowerBaseShear'] = 0.0
             damage['MonopileBaseAxial'] = 0.0
             damage['MonopileBaseShear'] = 0.0
-            
-            for s in ['Ax','Sh']:
-                sstr = 'Axial' if s=='Ax' else 'Shear'
-                for ik, k in enumerate(['F','M']):
-                    for ix, x in enumerate(['x','yz']):
+
+            for s in ['Ax', 'Sh']:
+                sstr = 'Axial' if s == 'Ax' else 'Shear'
+                for ik, k in enumerate(['F', 'M']):
+                    for ix, x in enumerate(['x', 'yz']):
                         damage[f'LSS{sstr}'] += damage[f'LSShft{s}{k}{x}a']
 
-            for s in ['Ax','Sh']:
-                sstr = 'Axial' if s=='Ax' else 'Shear'
-                for ik, k in enumerate(['For','Mom']):
-                    for ix, x in enumerate(['Z','XY']):
+            for s in ['Ax', 'Sh']:
+                sstr = 'Axial' if s == 'Ax' else 'Shear'
+                for ik, k in enumerate(['For', 'Mom']):
+                    for ix, x in enumerate(['Z', 'XY']):
                         damage[f'TowerBase{sstr}'] += damage[f'TwrBs{s}{k}{x}t']
                         if modopt['flags']['monopile'] and modopt['QBlade']['flag']:
                             damage[f'MonopileBase{sstr}'] += damage[f'M1N1{s}{k}K{x}e']
-            
+
             # Assemble damages
             outputs['damage_blade_root_sparU'] = np.max([damage[f'BladeRootSparU_Axial{k+1}'] for k in range(self.n_blades)])
             outputs['damage_blade_root_sparL'] = np.max([damage[f'BladeRootSparL_Axial{k+1}'] for k in range(self.n_blades)])
             outputs['damage_blade_maxc_teU'] = np.max([damage[f'BladeMaxcTEU_Axial{k+1}'] for k in range(self.n_blades)])
             outputs['damage_blade_maxc_teL'] = np.max([damage[f'BladeMaxcTEL_Axial{k+1}'] for k in range(self.n_blades)])
-            outputs['damage_lss'] = np.sqrt( damage['LSSAxial']**2 + damage['LSSShear']**2 )
-            outputs['damage_tower_base'] = np.sqrt( damage['TowerBaseAxial']**2 + damage['TowerBaseShear']**2 )
-            outputs['damage_monopile_base'] = np.sqrt( damage['MonopileBaseAxial']**2 + damage['MonopileBaseShear']**2 )
+            outputs['damage_lss'] = np.sqrt(damage['LSSAxial']**2 + damage['LSSShear']**2)
+            outputs['damage_tower_base'] = np.sqrt(damage['TowerBaseAxial']**2 + damage['TowerBaseShear']**2)
+            outputs['damage_monopile_base'] = np.sqrt(damage['MonopileBaseAxial']**2 + damage['MonopileBaseShear']**2)
 
             # Log damages
             if self.options['opt_options']['constraints']['damage']['tower_base']['log']:
@@ -2879,7 +3067,8 @@ class QBLADELoadCases(ExplicitComponent):
         if m <= 0.0:
             raise ValueError("Mooring fatigue tn_m must be positive.")
 
-        fatigue_case_ids = [i for i, case in enumerate(dlc_generator.cases) if case.label == "Custom" and float(case.probability) > 0.0]
+        self._select_dlc_cases(dlc_generator)
+        fatigue_case_ids = [case_id for case_id in self._fatigue_case_ids if float(dlc_generator.cases[case_id].probability) > 0.0]
 
         if not fatigue_case_ids:
             raise ValueError("Mooring fatigue requires at least one Custom DLC with positive probability.")
@@ -2888,17 +3077,14 @@ class QBLADELoadCases(ExplicitComponent):
         failed_fatigue_cases = [case_id for case_id in fatigue_case_ids if case_id in failed_set]
 
         if failed_fatigue_cases:
-            raise RuntimeError("Cannot calculate mooring fatigue because positive-probability fatigue cases failed: {failed_fatigue_cases}")
+            raise RuntimeError(f"Cannot calculate mooring fatigue because positive-probability Custom cases failed: {failed_fatigue_cases}")
 
         probability_sum = sum(float(dlc_generator.cases[i].probability) for i in fatigue_case_ids)
 
         if abs(probability_sum - 1.0) > 1.0e-3:
             logger.warning(f"Mooring fatigue Custom DLC probabilities sum to %.6f, not 1.0. The provided probability mass will be used without normalization.", probability_sum)
 
-        case_to_row = self._result_case_row_map(sum_stats, dlc_generator.n_cases, failed_sim_ids, "summary statistics table")
-
-        if len(chan_time) != len(sum_stats):
-            raise RuntimeError(f"Mooring fatigue time-series/statistics length mismatch:  chan_time={len(chan_time)}, summary_stats={len(sum_stats)}.")
+        case_to_row = self._timeseries_case_row_map(chan_time, dlc_generator.n_cases, failed_sim_ids)
 
         seconds_per_year = 365.25 * 24.0 * 3600.0
         load_sum = np.zeros((self.n_mooring_lines, len(self.mooring_fatigue_stations)))
@@ -3550,8 +3736,9 @@ class QBLADELoadCases(ExplicitComponent):
         else:
             n_cases = len(self.qb_vt['QSim']['MEANINF'])
             
-        succesful_cases = np.delete(range(n_cases), failed_sim_ids)
-        for i_ts, timeseries in enumerate(chan_time):
+        case_to_row = self._timeseries_case_row_map(chan_time, n_cases, failed_sim_ids)
+        for case_id, i_ts in sorted(case_to_row.items()):
+            timeseries = chan_time[i_ts]
             
             # If filter is provided, filter the timeseries
             if channels_no_unit:
@@ -3564,16 +3751,16 @@ class QBLADELoadCases(ExplicitComponent):
                 # If filtered_timeseries is not empty, save it
                 if filtered_timeseries:
                     output = OpenFASTOutput.from_dict(filtered_timeseries, self.QBLADE_namingOut)
-                    output.df.to_pickle(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(succesful_cases[i_ts]) + '.p'))
+                    output.df.to_pickle(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(case_id) + '.p'))
                     if self.options["modeling_options"].get("TowerFatigue", {}).get("flag", False):
-                        output.df.to_parquet(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(succesful_cases[i_ts]) + '.parquet'), compression="zstd")
+                        output.df.to_parquet(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(case_id) + '.parquet'), compression="zstd")
 
             # Only save the original timeseries if no filter is applied
             if not channels_no_unit:
                 output = OpenFASTOutput.from_dict(timeseries, self.QBLADE_namingOut)
-                output.df.to_pickle(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(succesful_cases[i_ts]) + '.p'))
+                output.df.to_pickle(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(case_id) + '.p'))
                 if self.options["modeling_options"].get("TowerFatigue", {}).get("flag", False):
-                    output.df.to_parquet(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(succesful_cases[i_ts]) + '.parquet'), compression="zstd")
+                    output.df.to_parquet(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(case_id) + '.parquet'), compression="zstd")
         
     def read_failure_log(self):
         status_file = os.path.join(self.QBLADE_runDirectory, "qblade_run_failure_log.yaml")
@@ -3592,10 +3779,14 @@ class QBLADELoadCases(ExplicitComponent):
 
         if iteration_key in failures and failures[iteration_key].get("failed_simulations"):
             for sim in failures[iteration_key]['failed_simulations']:
-                match = re.search(r'_(\d+)\.sim$', sim)
-                if match:
-                    failed_sim_ids.append(int(match.group(1)))
-        
+                if self._qblade_case_name_to_id:
+                    failed_sim_ids.append(self._qblade_case_id(sim))
+                else:
+                    # Preserve the legacy path when no explicit case registry exists.
+                    match = re.search(r'_(\d+)\.sim$', sim)
+                    if match:
+                        failed_sim_ids.append(int(match.group(1)))
+
         return failed_sim_ids
 
     def store_turbines(self):

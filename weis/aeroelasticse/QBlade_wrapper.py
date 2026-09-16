@@ -94,6 +94,7 @@ class QBladeWrapper:
         self.magnitude_channels = magnitude_channels_default
         self.fatigue_channels   = fatigue_channels_default
         self.la                 = None
+        self.result_names       = ()  # same order as the returned time series
 
     def init_crunch(self):
         if self.la is None:
@@ -149,15 +150,15 @@ class QBladeWrapper:
             dam[_name] = _dam
             ct.append(_ct)
             
-        # Delete the .out files after processing
+        processed = self._post_process_named_results(ss, et, dl, dam, ct)
+
+        # Delete the .out files after successful post-processing.
         if self.delete_out_files:
             for f in out_files:
                 os.remove(os.path.join(self.QBLADE_runDirectory, f))
                 print(f"Successfully deleted {f}.")
 
-        summary_stats, extreme_table, DELs, Damage = self.la.post_process(ss, et, dl, dam)
-
-        return summary_stats, extreme_table, DELs, Damage, ct
+        return processed
 
     def parallel_analyze_cases(self,file_name):
             QBLADE_Output_txt = os.path.join(self.QBLADE_runDirectory, file_name)
@@ -189,14 +190,31 @@ class QBladeWrapper:
             dam[_name] = _dam
             ct.append(_ct)
         
-        # Delete the .out files after processing
+        processed = self._post_process_named_results(ss, et, dl, dam, ct)
+
+        # Delete the .out files after successful post-processing.
         if self.delete_out_files:
             for f in out_files:
                 os.remove(os.path.join(self.QBLADE_runDirectory, f))
                 print(f"Successfully deleted {f}.")
-        
-        summary_stats, extreme_table, DELs, Damage = self.la.post_process(ss, et, dl, dam)
-        
+
+        return processed
+
+    def _post_process_named_results(self, ss, et, dl, dam, ct):
+        """Keep the QBlade filename associated with each returned time series."""
+        self.result_names = tuple(ss)
+        if not self.result_names or len(self.result_names) != len(ct):
+            raise RuntimeError("QBlade result names and time-series count are inconsistent.")
+
+        summary_stats, _, DELs, Damage = self.la.post_process(ss, et, dl, dam)
+        for table_name, table in (("summary statistics", summary_stats), ("DELs", DELs), ("damage", Damage)):
+            if not table.index.is_unique or set(table.index) != set(self.result_names):
+                raise RuntimeError(f"pCrunch {table_name} did not retain unique QBlade result filenames; positional result mapping is not safe.")
+
+        # Keep concomitant extreme events aligned with the row order actually
+        # returned by pCrunch.  Do not combine component-wise maxima.
+        extreme_table = {channel: [et[name][channel] for name in summary_stats.index] for channel in et[self.result_names[0]]}
+
         return summary_stats, extreme_table, DELs, Damage, ct
         
     def set_environment(self):
