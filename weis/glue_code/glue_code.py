@@ -132,6 +132,24 @@ class WindPark(om.Group):
         # Analysis components
         self.add_subsystem('wisdem',   wisdemPark(modeling_options = modeling_options, opt_options = opt_options), promotes=['*'])
 
+        if opt_options['constraints']['floating'].get('mooring_length_min', {}).get('flag', False):
+            if not modeling_options['flags']['mooring']:
+                raise ValueError('Minimum mooring length constraint requires the mooring model.')
+            mooropt = modeling_options['mooring']
+            n_lines = mooropt['n_lines']
+            self.add_subsystem('mooring_length_check', om.ExecComp(
+                'margin = length - (sum((node2 - node1)**2, axis=1)**0.5)*1.1',
+                margin={'val': np.zeros(n_lines), 'units': 'm'},
+                length={'val': np.zeros(n_lines), 'units': 'm'},
+                node1={'val': np.zeros((n_lines, 3)), 'units': 'm'},
+                node2={'val': np.zeros((n_lines, 3)), 'units': 'm'},
+            ))
+            self.connect('mooring.unstretched_length', 'mooring_length_check.length')
+            for endpoint in ('node1', 'node2'):
+                indices = [mooropt['node_names'].index(name) for name in mooropt[endpoint]]
+                self.connect('mooring.mooring_nodes', f'mooring_length_check.{endpoint}',
+                             src_indices=om.slicer[indices, :])
+
         # XFOIL
         self.add_subsystem('xf',        RunXFOIL(modeling_options = modeling_options, opt_options = opt_options)) # Recompute polars with xfoil (for flaps)
         # Connections to run xfoil for te flaps

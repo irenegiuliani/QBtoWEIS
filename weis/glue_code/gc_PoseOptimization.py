@@ -200,6 +200,9 @@ class PoseOptimizationWEIS(PoseOptimization):
     def set_constraints(self, wt_opt):
         super(PoseOptimizationWEIS, self).set_constraints(wt_opt)
 
+        if self.opt['constraints']['floating'].get('mooring_length_min', {}).get('flag', False):
+            wt_opt.model.add_constraint('mooring_length_check.margin', lower=0.0)
+
         blade_opt = self.opt["design_variables"]["blade"]
         blade_constr = self.opt["constraints"]["blade"]
         if blade_constr['tip_deflection']['flag']:
@@ -426,7 +429,17 @@ class PoseOptimizationWEIS(PoseOptimization):
             if not self.modeling.get("flags", {}).get("mooring", False):
                 raise ValueError("Mooring fatigue constraint requires the mooring model.")
 
-            wt_opt.model.add_constraint(f"{self.floating_solve_component}.mooring_fatigue_constr", upper=mooring_fatigue_constraint.get("max", 1.0))            
+            n_lines = self.modeling["mooring"]["n_lines"]
+            n_stations = len(self.modeling["QBlade"]["QBladeOcean"]["MOO_Sensors_RelPos"])
+            for i_line in range(n_lines):
+                # Each row contains all sensor constraints for one mooring line.
+                wt_opt.model.add_constraint(
+                    f"{self.floating_solve_component}.mooring_fatigue_constr",
+                    indices=np.arange(i_line * n_stations, (i_line + 1) * n_stations),
+                    flat_indices=True,
+                    alias=f"mooring{i_line + 1}_fatigue_constr",
+                    upper=mooring_fatigue_constraint.get("max", 1.0),
+                )
                     
 
         return wt_opt
