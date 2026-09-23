@@ -121,6 +121,14 @@ properties:
                         type: number
                         default: 0.
                         description: the global rotation around the z-axis of the turbine in degrees
+                    LOADINGFILE:
+                        type: string
+                        default: ''
+                        description: path to the QBlade loading file (leave blank if unused)
+                    MULTIPLELOADINGFILES:
+                        type: string
+                        default: ''
+                        description: path to a folder containing loading files named after their simulations
                     FLOAT_SURGE:
                         type: number
                         default: 0.
@@ -497,6 +505,10 @@ properties:
                 default: {}
                 description: Blade file defining structural properties in QBlade (Chrono)
                 properties:
+                    lumped_blade_inertia:
+                        type: boolean
+                        default: False
+                        description: Replace distributed blade mass with an equivalent ADDMASS
                     USECRITDAMP:
                         type: boolean
                         default: False

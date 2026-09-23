@@ -241,6 +241,9 @@ class QBLADELoadCases(ExplicitComponent):
             self.add_input('beam:y_sc',             val=np.zeros(n_span), units='m',        desc='center of shear position Y (in OF referecence COS)')
             # Bug to fix: m->deg
             self.add_input('beam:Tw_iner',          val=np.zeros(n_span), units='m',        desc='orientation (twist) of the section principal inertia axes with respect the blade reference plane') 
+            self.add_input('blade_mass',            val=0.0, units='kg',                    desc='mass of one blade')
+            self.add_input('blade_span_cg',         val=0.0, units='m',                     desc='spanwise blade center of gravity')
+            self.add_input('blade_moment_of_inertia', val=0.0, units='kg*m**2',             desc='blade mass moment of inertia about hub')
             
             # Chrono tower structural definition inputs
             n_height_tow = modopt['WISDEM']['TowerSE']['n_height']
@@ -907,10 +910,11 @@ class QBLADELoadCases(ExplicitComponent):
             beta =  (qb_vt['Blade']['CRITDAMP']/100) / (np.pi * inputs['flap_freq'])
             qb_vt['Blade']['RAYLEIGHDMP'] = float(beta)
 
+        qb_vt['Blade']['r_curved'], qb_vt['Blade']['LENFRACT'] = self.calc_fractional_curved_length(inputs['ref_axis_blade'])
+
         if not modopt['SONATA']['flag'] and not qb_vt['Blade'].get('beamdyn_file'):
             strpit    =  inputs['beam:Tw_iner'] - inputs['theta']
         
-            qb_vt['Blade']['r_curved'], qb_vt['Blade']['LENFRACT'] = self.calc_fractional_curved_length(inputs['ref_axis_blade'])
             qb_vt['Blade']['MASSD']     =  inputs['beam:rhoA']
             # rotation_angle = np.radians(90.0 - strpit) # Calculate the rotation angle for coordinate transformation from OpenFAST to QBlade Chrono
             # qb_vt['Blade']['EIx']       =  abs(inputs['beam:EIxx'] * np.cos(rotation_angle) - inputs['beam:EIyy'] * np.sin(rotation_angle))
@@ -1054,6 +1058,27 @@ class QBLADELoadCases(ExplicitComponent):
                 qb_vt['Blade_6x6']['M55'].append(inertia_matrix[4, 4])
                 qb_vt['Blade_6x6']['M56'].append(inertia_matrix[4, 5])
                 qb_vt['Blade_6x6']['M66'].append(inertia_matrix[5, 5])
+
+        if qb_vt['Blade']['lumped_blade_inertia']:
+            if qb_vt['Blade_6x6']:
+                raise ValueError("lumped_blade_inertia is only supported for the standard blade model.")
+            mass = float(inputs['blade_mass'][0])
+            r_cg = float(inputs['blade_span_cg'][0])
+            inertia_hub = float(inputs['blade_moment_of_inertia'][0])
+            if mass <= 0. or not inputs['r'][0] <= r_cg <= inputs['r'][-1]:
+                raise ValueError('Invalid blade mass or spanwise CG.')
+            inertia_cg = inertia_hub - mass * r_cg**2
+            tolerance = 1.e-10 * max(abs(inertia_hub), 1.)
+            if inertia_cg < -tolerance:
+                raise ValueError('Equivalent blade inertia at the CG is negative.')
+            inertia_cg = max(inertia_cg, 0.)
+            position = float(np.interp(r_cg, inputs['r'], qb_vt['Blade']['LENFRACT']))
+            if not 0. <= position <= 1. or not np.isclose(inertia_cg + mass * r_cg**2, inertia_hub):
+                raise ValueError('Invalid equivalent lumped blade inertia.')
+            qb_vt['Blade']['DISCTYPE'] = 0
+            qb_vt['Blade']['DISC'] = 2
+            qb_vt['Blade']['ADDMASS'] = [position, mass, inertia_cg]
+            qb_vt['Blade']['MASSD'] = np.zeros_like(qb_vt['Blade']['MASSD'])
 
         ## Tower structural definition inputs
         # TODO OpenFAST seperates the tower dfinition in sectional and nodal properties. Nodal being the description used for Aerodyn while the sectional 
@@ -1700,13 +1725,14 @@ class QBLADELoadCases(ExplicitComponent):
                 moorint_hydro_cp = np.ones(len(inputs["line_transverse_added_mass"]))
                 # these two don't really exist in QBlade for Mooring Lines
                 
-                # calculate E from EA
-                moo_diameter = inputs['line_diameter']
+                # Use nominal studless-chain diameter for E and I, volume diameter for hydrodynamics.
+                moo_diameter = inputs['line_diameter'].copy()
+                moo_diameter[np.asarray(mooropt['line_material']) == 'chain'] /= 1.8
                 moo_area = np.pi * (moo_diameter / 2)**2
                 moo_e = inputs["line_stiffness"] / moo_area
-                moo_iy = np.pi * (moo_diameter / 2)**4 / 64 
+                moo_iy = np.pi * moo_diameter**4 / 64
                 qb_vt['QBladeOcean']['MooEI'] = moo_e * moo_iy
-                qb_vt['QBladeOcean']['MooDiameter'] = moo_diameter
+                qb_vt['QBladeOcean']['MooDiameter'] = inputs['line_diameter']
 
                 # Mooring members
                 node_idx = {name: i for i, name in enumerate(mooropt["node_names"])}

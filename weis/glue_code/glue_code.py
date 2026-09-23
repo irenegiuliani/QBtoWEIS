@@ -1156,6 +1156,9 @@ class WindPark(om.Group):
                 self.connect('rotorse.re.x_sc',                        'aeroelastic_qblade.beam:x_sc')
                 self.connect('rotorse.re.precomp.flap_iner',           'aeroelastic_qblade.beam:flap_iner')
                 self.connect('rotorse.re.precomp.edge_iner',           'aeroelastic_qblade.beam:edge_iner')
+                self.connect('rotorse.blade_mass',                     'aeroelastic_qblade.blade_mass')
+                self.connect('rotorse.blade_span_cg',                  'aeroelastic_qblade.blade_span_cg')
+                self.connect('rotorse.blade_moment_of_inertia',        'aeroelastic_qblade.blade_moment_of_inertia')
                 # self.connect('rotorse.re.Tw_iner',                     'aeroelastic_qblade.beam:Tw_iner') # TODO: what happened to Tw_iner?
                 self.connect('rotorse.rs.frame.flap_mode_freqs',       'aeroelastic_qblade.flap_freq', src_indices=[0])
                 self.connect('rotorse.rs.frame.edge_mode_freqs',       'aeroelastic_qblade.edge_freq', src_indices=[0])

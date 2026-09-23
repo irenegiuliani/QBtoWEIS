@@ -16,6 +16,7 @@ and may not be used without authorization.
 
 import os
 import copy
+import shutil
 import random
 import time
 import operator
@@ -475,6 +476,11 @@ class InputWriter_QBlade(object):
             f.write(f"{str(self.qb_vt['Blade']['DISC']):<{object_lenght}}DISC \n")
             f.write('\n')
 
+            if 'ADDMASS' in self.qb_vt['Blade']:
+                position, mass, inertia = self.qb_vt['Blade']['ADDMASS']
+                # Equivalent 1D blade: zero inertia about the local spanwise Z axis.
+                f.write(f"ADDMASS_{position:.8f} {mass:.8e} {inertia:.8e} {inertia:.8e} 0.0 0.0 0.0 0.0\n\n")
+
             f.write('LENFRACT_[-]  XCB_[-]       YCB_[-]       PITCH_[deg]   K11_[N]       K12_[N]       K13_[N]       K14_[Nm]      K15_[Nm]      K16_[Nm]      K22_[N]       K23_[N]       K24_[Nm]      K25_[Nm]      K26_[Nm]      K33_[N]       K34_[Nm]      K35_[Nm]      K36_[Nm]      K44_[Nm^2]    K45_[Nm^2]    K46_[Nm^2]    K55_[Nm^2]    K56_[Nm^2]    K66_[Nm^2]    M11_[kg]      M12_[kg]      M13_[kg]      M14_[kgm]     M15_[kgm]     M16_[kgm]     M22_[kg]      M23_[kg]      M24_[kgm]     M25_[kgm]     M26_[kgm]     M33_[kg]      M34_[kgm]     M35_[kgm]     M36_[kgm]     M44_[kgm^2]   M45_[kgm^2]   M46_[kgm^2]   M55_[kgm^2]   M56_[kgm^2]   M66_[kgm^2]\n')
 
             # Access the values from the self.qb_vt['Blade_6x6'] dictionary
@@ -543,7 +549,10 @@ class InputWriter_QBlade(object):
             f.write(f"{str(self.qb_vt['Blade']['DISC']):<{object_lenght}}DISC \n")
             f.write('\n')
 
-            # TODO AddMasses
+            if 'ADDMASS' in self.qb_vt['Blade']:
+                position, mass, inertia = self.qb_vt['Blade']['ADDMASS']
+                # Equivalent 1D blade: zero inertia about the local spanwise Z axis.
+                f.write(f"ADDMASS_{position:.8f} {mass:.8e} {inertia:.8e} {inertia:.8e} 0.0 0.0 0.0 0.0\n\n")
             f.write('LENFRACT_[-]    MASSD_[kg/m]    EIx_[N.m^2]     EIy_[N.m^2]     EA_[N]          GJ_[N.m^2]      GA_[N]          STRPIT_[deg]    KSX_[-]'
                     '         KSY_[-]         RGX_[-]         RGY_[-]         XCM_[-]         YCM_[-]         XCE_[-]         YCE_[-]         XCS_[-]         YCS_[-]\n')
             
@@ -1243,6 +1252,17 @@ class InputWriter_QBlade(object):
         self.qb_vt['QSim']['SimFile'] = os.path.join(self.QBLADE_namingOut + '.sim')
         sim_file = os.path.join(self.QBLADE_runDirectory, self.qb_vt['QSim']['SimFile'])
         trb_file_path = os.path.join(self.QBLADE_namingOut, self.qb_vt['Turbine']['TrbFile'])
+        loading_file = self.qb_vt['QSim']['LOADINGFILE']
+        if self.qb_vt['QSim']['MULTIPLELOADINGFILES']:
+            loading_file = os.path.join(self.qb_vt['QSim']['MULTIPLELOADINGFILES'], self.QBLADE_namingOut + '.txt')
+            if not os.path.isfile(loading_file):
+                loading_file = ''
+        if loading_file and os.path.isfile(loading_file):
+            loading_file_name = os.path.basename(loading_file)
+            loading_file_dest = os.path.join(self.QBLADE_runDirectory, loading_file_name)
+            if os.path.abspath(loading_file) != os.path.abspath(loading_file_dest):
+                shutil.copy2(loading_file, loading_file_dest)
+            loading_file = loading_file_name
         object_length = 30 
         keyword_length = 25
 
@@ -1299,7 +1319,7 @@ class InputWriter_QBlade(object):
             f.write(f"{str(self.qb_vt['QSim']['GLOBROT_Z']):<{object_length}}{'GLOBROT_Z':<{keyword_length}} - the global rotation about the z-axis of the turbine [deg]\n")
             #start Dummy placeholders for the moment:
             f.write(f"{str(''):<{object_length}}{'EVENTFILE':<{keyword_length}} - the loading file name (leave blank if unused)\n")
-            f.write(f"{str(''):<{object_length}}{'LOADINGFILE':<{keyword_length}} - the loading file name (leave blank if unused))\n")
+            f.write(f"{str(loading_file + ' '):<{object_length}}{'LOADINGFILE':<{keyword_length}} - the loading file name (leave blank if unused)\n")
             f.write(f"{str(''):<{object_length}}{'SIMFILE':<{keyword_length}} - the simulation file name (leave blank if unused)\n")
             f.write(f"{str(''):<{object_length}}{'MOTIONFILE':<{keyword_length}} - the prescribed motion file name (leave blank if unused)\n")
             #end Dummy placeholders for the moment
@@ -1309,6 +1329,7 @@ class InputWriter_QBlade(object):
             f.write(f"{str(self.qb_vt['QSim']['FLOAT_ROLL']):<{object_length}}{'FLOAT_ROLL':<{keyword_length}} - the initial floater roll [deg]\n")
             f.write(f"{str(self.qb_vt['QSim']['FLOAT_PITCH']):<{object_length}}{'FLOAT_PITCH':<{keyword_length}} - the initial floater pitch [deg]\n")
             f.write(f"{str(self.qb_vt['QSim']['FLOAT_YAW']):<{object_length}}{'FLOAT_YAW':<{keyword_length}} - the initial floater yaw [deg]\n")
+            f.write('END_TURB_1\n')
             f.write('\n')
 
             f.write('----------------------------------------Simulation Settings----------------------------------------------------------\n')
