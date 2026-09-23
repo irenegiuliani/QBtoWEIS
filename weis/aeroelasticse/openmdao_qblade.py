@@ -199,6 +199,8 @@ class QBLADELoadCases(ExplicitComponent):
             self.add_input('distance_tt_hub',       val=0.0, units='m',     desc='Vertical distance from tower top plane to hub flange')
             self.add_input('nacelle_I_TT',          val=np.zeros(6), units='kg*m**2',    desc='moments of Inertia for the nacelle [Ixx, Iyy, Izz, Ixy, Ixz, Iyz] about the tower top')
             self.add_input('tower_I_base',          val=np.zeros(6), units='kg*m**2',    desc='tower moments of inertia at the tower base')
+            self.add_input('tower_mass',            val=0.0, units='kg',                 desc='tower mass')
+            self.add_input('tower_center_of_mass',  val=0.0, units='m',                  desc='tower center of mass elevation')
             self.add_input('r',                     val=np.zeros(n_span), units='m', desc='radial positions. r[0] should be the hub location \
                 while r[-1] should be the blade tip. Any number \
                 of locations can be specified between these in ascending order.')
@@ -816,7 +818,8 @@ class QBLADELoadCases(ExplicitComponent):
         qb_vt['Main']['NacCMx']         = round(inputs['nacelle_cm'][0], precision)
         qb_vt['Main']['NacCMy']         = round(inputs['nacelle_cm'][1], precision)
         qb_vt['Main']['NacCMz']         = round(inputs['nacelle_cm'][2], precision)
-        qb_vt['Main']['NacYIner']       = round(inputs['nacelle_I_TT'][2] + inputs['tower_I_base'][2]/3.0, precision)
+        tower_yaw_inertia = 0.0 if qb_vt['Tower']['lumped_tower_inertia'] else inputs['tower_I_base'][2]/3.0
+        qb_vt['Main']['NacYIner']       = round(inputs['nacelle_I_TT'][2] + tower_yaw_inertia, precision)
         qb_vt['Main']['HubMass']        = round(inputs['hub_system_mass'][0], precision)
         qb_vt['Main']['HubIner']        = round(inputs['hub_system_I'][0], precision)
 
@@ -1123,6 +1126,25 @@ class QBLADELoadCases(ExplicitComponent):
         qb_vt['Tower']['YCS']       = np.zeros_like(sec_loc)
         qb_vt['Tower']['DIA']       = twr_aero_d_sections
         qb_vt['Tower']['CD']        = twr_aero_cd
+
+        if qb_vt['Tower']['lumped_tower_inertia']:
+            mass = float(inputs['tower_mass'])
+            tower_height = twr_elev_nodes[-1] - twr_elev_nodes[0]
+            z_cg = float(inputs['tower_center_of_mass']) - twr_elev_nodes[0]
+            inertia_base = inputs['tower_I_base']
+            inertia_cg = inertia_base.copy()
+            inertia_cg[:2] -= mass * z_cg**2
+            tolerance = 1.e-10 * max(np.max(np.abs(inertia_base)), 1.)
+            if mass <= 0. or tower_height <= 0. or not 0. <= z_cg <= tower_height:
+                raise ValueError('Invalid tower mass or center of mass.')
+            if np.any(inertia_cg[:3] < -tolerance):
+                raise ValueError('Equivalent tower inertia at the CG is negative.')
+            inertia_cg[:3] = np.maximum(inertia_cg[:3], 0.)
+            position = float(z_cg / tower_height)
+            qb_vt['Tower']['DISCTYPE'] = 0
+            qb_vt['Tower']['DISC'] = 2
+            qb_vt['Tower']['ADDMASS'] = [position, mass, *inertia_cg]
+            qb_vt['Tower']['MASSD'] = np.zeros_like(qb_vt['Tower']['MASSD'])
     
         ## Sub-Structure QBladeOcean structural definition inputs
         if modopt['flags']['offshore']: # only if an offshore turbine is modeled

@@ -569,6 +569,10 @@ properties:
                 default: {}
                 description: Tower file defining structural properties in QBlade (Chrono)
                 properties:
+                    lumped_tower_inertia:
+                        type: boolean
+                        default: False
+                        description: Replace distributed tower mass with an equivalent ADDMASS at the tower center of gravity
                     USECRITDAMP:
                         type: boolean
                         default: False

@@ -417,7 +417,10 @@ class InputWriter_QBlade(object):
             f.write(f"{str(self.qb_vt['Tower']['DISC']):<{object_lenght}}DISC \n")
             f.write('\n')
 
-            # TODO AddMasses
+            if 'ADDMASS' in self.qb_vt['Tower']:
+                position, mass, *inertia = self.qb_vt['Tower']['ADDMASS']
+                f.write(f"ADDMASS_{position:.8f} {mass:.8e} {' '.join(f'{value:.8e}' for value in inertia)}\n\n")
+
             f.write('LENFRACT_[-]    MASSD_[kg/m]    EIx_[N.m^2]     EIy_[N.m^2]     EA_[N]          GJ_[N.m^2]      GA_[N]          STRPIT_[deg]    KSX_[-]'
                     '         KSY_[-]         RGX_[-]         RGY_[-]         XCM_[-]         YCM_[-]         XCE_[-]         YCE_[-]         XCS_[-]         YCS_[-]'
                     '         DIA_[m]         CD_[-]''\n')

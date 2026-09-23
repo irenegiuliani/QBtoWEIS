@@ -1196,6 +1196,8 @@ class WindPark(om.Group):
                 self.connect('nacelle.distance_tt_hub',             'aeroelastic_qblade.distance_tt_hub')
                 self.connect('drivese.above_yaw_I_TT',              'aeroelastic_qblade.nacelle_I_TT')
                 self.connect('towerse.tower_I_base',                'aeroelastic_qblade.tower_I_base')
+                self.connect('towerse.tower_mass',                  'aeroelastic_qblade.tower_mass')
+                self.connect('towerse.tower_center_of_mass',        'aeroelastic_qblade.tower_center_of_mass')
 
                 if modeling_options['flags']['monopile']:
                     self.connect('monopile.transition_piece_mass',  'aeroelastic_qblade.transition_piece_mass')
