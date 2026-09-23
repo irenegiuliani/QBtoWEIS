@@ -2621,7 +2621,8 @@ class QBLADELoadCases(ExplicitComponent):
                 if _failed_fatigue:
                     raise RuntimeError(f"Cannot calculate tower fatigue because positive-probability Custom cases failed: {_failed_fatigue}")
 
-                _case_names = [self.QBLADE_namingOut + '_' + str(case_id) for case_id in _fatigue_ids]
+                _qblade_case_names = tuple(self._qblade_case_name_to_id)
+                _case_names = [_qblade_case_names[case_id] for case_id in _fatigue_ids]
                 _case_prob = [float(dlc_generator.cases[case_id].probability) for case_id in _fatigue_ids]
                 _case_files = [name + '.parquet' for name in _case_names]
 
@@ -3767,8 +3768,10 @@ class QBLADELoadCases(ExplicitComponent):
             n_cases = len(self.qb_vt['QSim']['MEANINF'])
             
         case_to_row = self._timeseries_case_row_map(chan_time, n_cases, failed_sim_ids)
+        qblade_case_names = tuple(self._qblade_case_name_to_id)
         for case_id, i_ts in sorted(case_to_row.items()):
             timeseries = chan_time[i_ts]
+            case_name = qblade_case_names[case_id]
             
             # If filter is provided, filter the timeseries
             if channels_no_unit:
@@ -3781,16 +3784,16 @@ class QBLADELoadCases(ExplicitComponent):
                 # If filtered_timeseries is not empty, save it
                 if filtered_timeseries:
                     output = OpenFASTOutput.from_dict(filtered_timeseries, self.QBLADE_namingOut)
-                    output.df.to_pickle(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(case_id) + '.p'))
+                    output.df.to_pickle(os.path.join(save_dir, case_name + '.p'))
                     if self.options["modeling_options"].get("TowerFatigue", {}).get("flag", False):
-                        output.df.to_parquet(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(case_id) + '.parquet'), compression="zstd")
+                        output.df.to_parquet(os.path.join(save_dir, case_name + '.parquet'), compression="zstd")
 
             # Only save the original timeseries if no filter is applied
             if not channels_no_unit:
                 output = OpenFASTOutput.from_dict(timeseries, self.QBLADE_namingOut)
-                output.df.to_pickle(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(case_id) + '.p'))
+                output.df.to_pickle(os.path.join(save_dir, case_name + '.p'))
                 if self.options["modeling_options"].get("TowerFatigue", {}).get("flag", False):
-                    output.df.to_parquet(os.path.join(save_dir, self.QBLADE_namingOut + '_' + str(case_id) + '.parquet'), compression="zstd")
+                    output.df.to_parquet(os.path.join(save_dir, case_name + '.parquet'), compression="zstd")
         
     def read_failure_log(self):
         status_file = os.path.join(self.QBLADE_runDirectory, "qblade_run_failure_log.yaml")
