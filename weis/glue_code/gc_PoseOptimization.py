@@ -83,7 +83,38 @@ class PoseOptimizationWEIS(PoseOptimization):
 
     
     def set_design_variables(self, wt_opt, wt_init):
-        super(PoseOptimizationWEIS, self).set_design_variables(wt_opt, wt_init)
+        # WISDEM 3.19.0 does not pass flat_indices to user-defined design
+        # variables. Temporarily remove them from the parent call and add
+        # them below with the WEIS extension.
+        user_defined = self.opt["design_variables"].pop("user", [])
+
+        try:
+            super(PoseOptimizationWEIS, self).set_design_variables(wt_opt, wt_init)
+        finally:
+            self.opt["design_variables"]["user"] = user_defined
+
+        for user_dv in user_defined:
+
+            name_i = user_dv["name"]
+
+            if "lower_bound" in user_dv:
+                lower_i = user_dv["lower_bound"]
+            elif "lower" in user_dv:
+                lower_i = user_dv["lower"]
+            else:
+                lower_i = None
+
+            if "upper_bound" in user_dv:
+                upper_i = user_dv["upper_bound"]
+            elif "upper" in user_dv:
+                upper_i = user_dv["upper"]
+            else:
+                upper_i = None
+
+            ref_i = user_dv.get("ref", None)
+            indices_i = user_dv.get("indices", None)
+            flat_indices_i = user_dv.get("flat_indices", False)
+            wt_opt.model.add_design_var(name_i, lower=lower_i, upper=upper_i, ref=ref_i, indices=indices_i, flat_indices=flat_indices_i)
 
         # -- Control --
         control_opt = self.opt['design_variables']['control']

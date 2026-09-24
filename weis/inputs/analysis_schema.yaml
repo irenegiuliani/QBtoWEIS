@@ -366,6 +366,14 @@ properties:
                                         lower_bound: *bound
                                         upper_bound: *bound
                                         initial: *initial
+            user:
+                items:
+                    properties:
+                        flat_indices:
+                            type: boolean
+                            default: False
+                            description: Interpret indices as indices into the flattened source array.                                        
+
     constraints:
         # GB: These all need gammas or safety factors
         type: object
