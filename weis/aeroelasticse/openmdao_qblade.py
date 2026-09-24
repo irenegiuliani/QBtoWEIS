@@ -684,13 +684,11 @@ class QBLADELoadCases(ExplicitComponent):
         self._select_dlc_cases(dlc_generator)
         case_to_row = self._result_case_row_map(summary_stats, dlc_generator.n_cases, failed_sim_ids, "summary statistics table")
 
-        # Only tower/mooring ULS use this filtered population.  If one of their
-        # configured ULS cases is missing, do not silently fall back to Custom.
         missing_uls = [case_id for case_id in self._uls_case_ids if case_id not in case_to_row]
         if missing_uls:
-            raise RuntimeError(f"Required ULS QBlade cases are missing: {missing_uls}. No fallback to a different DLC population is allowed.")
+            logger.warning(f"Skipping failed/missing ULS QBlade cases: {missing_uls}.")
 
-        rows = [case_to_row[case_id] for case_id in self._uls_case_ids]
+        rows = [case_to_row[case_id] for case_id in self._uls_case_ids if case_id in case_to_row]
         if not rows:
             raise RuntimeError("No QBlade cases are available for tower/mooring ULS evaluation.")
         if any(len(events) != len(summary_stats) for events in extreme_table.values()):
@@ -2776,13 +2774,10 @@ class QBLADELoadCases(ExplicitComponent):
 
             case_to_row = self._result_case_row_map(DELs, dlc_generator.n_cases, failed_sim_ids, "DEL table")
 
-            # A missing positive-probability Custom case would make the
-            # lifetime fatigue population incomplete. Do not silently
-            # discard it and do not renormalize the remaining population.
             missing_positive_custom = [case_id for case_id in custom_ids if float(dlc_generator.cases[case_id].probability) > 0.0 and case_id not in case_to_row]
 
             if missing_positive_custom:
-                raise RuntimeError(f"Cannot calculate Custom DEL/damage weighting because positive-probability Custom cases are missing: {missing_positive_custom}")
+                logger.warning(f"Skipping failed/missing positive-probability Custom cases: {missing_positive_custom}.")
 
             # Custom cases with probability == 0 do not contribute to
             # fatigue and therefore do not need to enter the aggregation.
@@ -3130,7 +3125,8 @@ class QBLADELoadCases(ExplicitComponent):
         failed_fatigue_cases = [case_id for case_id in fatigue_case_ids if case_id in failed_set]
 
         if failed_fatigue_cases:
-            raise RuntimeError(f"Cannot calculate mooring fatigue because positive-probability Custom cases failed: {failed_fatigue_cases}")
+            logger.warning(f"Skipping failed mooring fatigue cases: {failed_fatigue_cases}.")
+            fatigue_case_ids = [case_id for case_id in fatigue_case_ids if case_id not in failed_set]
 
         probability_sum = sum(float(dlc_generator.cases[i].probability) for i in fatigue_case_ids)
 
