@@ -93,7 +93,8 @@ def run_qblade_sil(QBlade_dll, QBLADE_runDirectory, channels, number_of_workers,
 
     # Run simulations in groups of at most number_of_workers
     for batch_start in range(0, len(simulations_with_device), number_of_workers):
-
+        batch_t0 = time.perf_counter()
+        
         batch = simulations_with_device[batch_start:batch_start + number_of_workers]
 
         print(f"Starting QBlade batch {batch_start // number_of_workers + 1} with {len(batch)} simulations.")
@@ -133,8 +134,16 @@ def run_qblade_sil(QBlade_dll, QBLADE_runDirectory, channels, number_of_workers,
                         os.remove(output_file)
                     print(f"Simulation failed with exception: {e}")
 
+        batch_elapsed = time.perf_counter() - batch_t0
+        
         # Here the executor has been shut down and its worker processes are gone
         print(f"QBlade batch {batch_start // number_of_workers + 1} completed. Worker processes closed.")
+        
+        print(f"Worker processes closed. "
+              f"Elapsed time: {batch_elapsed:.2f} s "
+              f"({batch_elapsed / 60:.2f} min).")        
+        
+
 
 
 def log_failed_simulation(sim_name, qb_inumber, run_directory):
