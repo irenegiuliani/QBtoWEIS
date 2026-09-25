@@ -1126,10 +1126,27 @@ class QBLADELoadCases(ExplicitComponent):
         qb_vt['Tower']['CD']        = twr_aero_cd
 
         if qb_vt['Tower']['lumped_tower_inertia']:
-            mass = float(inputs['tower_mass'])
-            tower_height = twr_elev_nodes[-1] - twr_elev_nodes[0]
-            z_cg = float(inputs['tower_center_of_mass']) - twr_elev_nodes[0]
+            # Condense the same distributed mass table written for the full
+            # QBlade model.  The WISDEM aggregate tower properties can differ
+            # from this table, so use its exact piecewise-linear mass moments.
+            tower_height = float(qb_vt['Main']['TWRHEIGHT'])
+            z = tower_height * qb_vt['Tower']['LENFRACT']
+            mass_density = qb_vt['Tower']['MASSTUNER'] * qb_vt['Tower']['MASSD']
+            dz = np.diff(z)
+            mass_slope = np.diff(mass_density) / dz
+            mass_offset = mass_density[:-1] - mass_slope * z[:-1]
+
+            mass = np.sum(mass_offset * dz + 0.5 * mass_slope * (z[1:]**2 - z[:-1]**2))
+            first_moment = np.sum(0.5 * mass_offset * (z[1:]**2 - z[:-1]**2)
+                                  + mass_slope / 3.0 * (z[1:]**3 - z[:-1]**3))
+            second_moment = np.sum(mass_offset / 3.0 * (z[1:]**3 - z[:-1]**3)
+                                   + mass_slope / 4.0 * (z[1:]**4 - z[:-1]**4))
+            z_cg = first_moment / mass
+
             inertia_base = inputs['tower_I_base']
+            inertia_base = inertia_base.copy()
+            inertia_base[:2] = second_moment
+            inertia_base[2] /= 3.0
             inertia_cg = inertia_base.copy()
             inertia_cg[:2] -= mass * z_cg**2
             tolerance = 1.e-10 * max(np.max(np.abs(inertia_base)), 1.)
