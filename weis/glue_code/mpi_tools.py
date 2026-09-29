@@ -159,7 +159,10 @@ def subprocessor_stop(comm_map_down):
     Send stop signal to subprocessors
     """
     from openmdao.utils.mpi import MPI
-    for rank in comm_map_down.keys():
+    # Only the rank that feeds a group of subprocessors stops them; stop messages sent by the
+    # other ranks would never be received and can block MPI_Finalize (seen with MPICH)
+    rank = MPI.COMM_WORLD.Get_rank()
+    if rank in comm_map_down.keys():
         subranks = comm_map_down[rank]
         for subrank_i in subranks:
             MPI.COMM_WORLD.send([False], dest=subrank_i, tag=0)

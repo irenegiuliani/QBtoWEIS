@@ -589,10 +589,12 @@ class FASTLoadCases(ExplicitComponent):
             fst_vt = fast_reader.fst_vt
 
             # Fix TwrTI: WEIS modeling options have it as a single value...
-            if not isinstance(fst_vt['AeroDyn']['TwrTI'],list):
-                fst_vt['AeroDyn']['TwrTI'] = [fst_vt['AeroDyn']['TwrTI']] * len(fst_vt['AeroDyn']['TwrElev'])
-            if not isinstance(fst_vt['AeroDyn']['TwrCb'],list):
-                fst_vt['AeroDyn']['TwrCb'] = [fst_vt['AeroDyn']['TwrCb']] * len(fst_vt['AeroDyn']['TwrElev'])
+            # (AeroDyn is only read when the deck computes aerodynamics, CompAero = 2)
+            if fst_vt['AeroDyn']:
+                if not isinstance(fst_vt['AeroDyn']['TwrTI'],list):
+                    fst_vt['AeroDyn']['TwrTI'] = [fst_vt['AeroDyn']['TwrTI']] * len(fst_vt['AeroDyn']['TwrElev'])
+                if not isinstance(fst_vt['AeroDyn']['TwrCb'],list):
+                    fst_vt['AeroDyn']['TwrCb'] = [fst_vt['AeroDyn']['TwrCb']] * len(fst_vt['AeroDyn']['TwrElev'])
 
             # Fix AddF0: Should be a n x 1 array (list of lists):
             if fst_vt['HydroDyn']:
@@ -886,15 +888,16 @@ class FASTLoadCases(ExplicitComponent):
         if ('openfast_configuration' in modeling_options['General']) and ('path2dll' in modeling_options['General']['openfast_configuration']):
             fst_vt['ServoDyn']['DLL_FileName'] = modeling_options['General']['openfast_configuration']['path2dll']
 
-        if fst_vt['AeroDyn']['IndToler'] == 0.:
-            fst_vt['AeroDyn']['IndToler'] = 'Default'
-        if fst_vt['AeroDyn']['DTAero'] == 0.:
-            fst_vt['AeroDyn']['DTAero'] = 'Default'
-        if 'OLAF' in fst_vt['AeroDyn'] and 'DTfvw' in fst_vt['AeroDyn']['OLAF']:
-            if fst_vt['AeroDyn']['OLAF']['DTfvw'] == 0.:
-                fst_vt['AeroDyn']['OLAF']['DTfvw'] = 'Default'
-        else:
-            fst_vt['AeroDyn']['OLAF'] = {}
+        if fst_vt['AeroDyn']:   # empty for from_openfast decks without AeroDyn (CompAero != 2)
+            if fst_vt['AeroDyn']['IndToler'] == 0.:
+                fst_vt['AeroDyn']['IndToler'] = 'Default'
+            if fst_vt['AeroDyn']['DTAero'] == 0.:
+                fst_vt['AeroDyn']['DTAero'] = 'Default'
+            if 'OLAF' in fst_vt['AeroDyn'] and 'DTfvw' in fst_vt['AeroDyn']['OLAF']:
+                if fst_vt['AeroDyn']['OLAF']['DTfvw'] == 0.:
+                    fst_vt['AeroDyn']['OLAF']['DTfvw'] = 'Default'
+            else:
+                fst_vt['AeroDyn']['OLAF'] = {}
         if fst_vt['ElastoDyn']['DT'] == 0.:
             fst_vt['ElastoDyn']['DT'] = 'Default'
         if fst_vt['Fst']['DT_Out'] == 0.:
@@ -2180,11 +2183,14 @@ class FASTLoadCases(ExplicitComponent):
             outputs = self.get_monopile_loading(summary_stats, extreme_table, inputs, outputs)
 
         # If DLC 1.1 not used, calculate_AEP will just compute average power of simulations
-        outputs, discrete_outputs = self.calculate_AEP(summary_stats, case_list, dlc_generator, discrete_inputs, outputs, discrete_outputs)
+        # (power, Cp and control measures need the aerodynamics, e.g. not with prescribed rotor loads)
+        if bool(self.fst_vt['Fst']['CompAero']):
+            outputs, discrete_outputs = self.calculate_AEP(summary_stats, case_list, dlc_generator, discrete_inputs, outputs, discrete_outputs)
 
         outputs, discrete_outputs = self.get_weighted_DELs(dlc_generator, DELs, damage, discrete_inputs, outputs, discrete_outputs)
         
-        outputs, discrete_outputs = self.get_control_measures(summary_stats, chan_time, inputs, discrete_inputs, outputs, discrete_outputs)
+        if bool(self.fst_vt['Fst']['CompAero']):
+            outputs, discrete_outputs = self.get_control_measures(summary_stats, chan_time, inputs, discrete_inputs, outputs, discrete_outputs)
 
         if modopt['flags']['floating'] or (modopt['OpenFAST']['from_openfast'] and self.fst_vt['Fst']['CompMooring']>0):
             outputs, discrete_outputs = self.get_floating_measures(summary_stats, chan_time, inputs, discrete_inputs,outputs, discrete_outputs)

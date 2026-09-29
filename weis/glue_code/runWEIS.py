@@ -112,7 +112,7 @@ def run_weis(fname_wt_input, fname_modeling_options, fname_opt_options,
                 wt_opt = om.Problem(model=WindPark(modeling_options = modeling_options, opt_options = opt_options, wt_init = wt_init), reports=False)
             else:
                 wt_opt = om.Problem(model=om.Group(num_par_fd=nFD), comm=comm_i, reports=False)
-                wt_opt.model.add_subsystem('comp', WindPark(modeling_options = modeling_options, opt_options = opt_options), promotes=['*'])
+                wt_opt.model.add_subsystem('comp', WindPark(modeling_options = modeling_options, opt_options = opt_options, wt_init = wt_init), promotes=['*'])
         else:
             # Sequential finite differencing and openfast simulations
             modeling_options['General']['openfast_configuration']['mpi_run'] = False
