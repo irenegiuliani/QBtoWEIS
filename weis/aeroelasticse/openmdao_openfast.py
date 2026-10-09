@@ -36,6 +36,13 @@ from weis.control.dtqp_wrapper          import dtqp_wrapper
 from openfast_io.StC_defaults        import default_StC_vt
 from weis.aeroelasticse.CaseGen_General import case_naming
 from wisdem.inputs import load_yaml, write_yaml
+from weis.aeroelasticse.mooring_fatigue import (
+    fatigue_damage,
+    fatigue_load_sum,
+    moordyn_fatigue_channel,
+    select_uls_case_ids,
+    validate_stations,
+)
 
 logger = logging.getLogger("wisdem/weis")
 
@@ -67,6 +74,25 @@ class FASTLoadCases(ExplicitComponent):
         self.n_blades      = modopt['assembly']['number_of_blades']
         self.n_span        = n_span    = rotorse_options['n_span']
         self.n_pc          = n_pc      = rotorse_options['n_pc']
+        self.n_mooring_lines = modopt["mooring"]["n_lines"] if modopt["flags"]["mooring"] else 0
+        self.mooring_fatigue_options = modopt.get("MooringsFatigue", {})
+        self.mooring_fatigue_constraint_options = (
+            self.options["opt_options"].get("constraints", {}).get("damage", {}).get("mooring_fatigue", {})
+        )
+        self.mooring_fatigue_active = bool(self.mooring_fatigue_options.get("flag", False))
+        self.mooring_fatigue_stations = tuple(self.mooring_fatigue_options.get("stations", []))
+        self._fast_case_name_to_id = {}
+        self._fast_case_name_to_dlc = {}
+        if self.mooring_fatigue_active:
+            if not modopt["OpenFAST"]["flag"]:
+                raise ValueError("Mooring fatigue with FASTLoadCases requires OpenFAST.flag=True.")
+            if not modopt["flags"]["mooring"]:
+                raise ValueError("Mooring fatigue requires the mooring model.")
+            validate_stations(self.mooring_fatigue_stations)
+            if not modopt["General"]["openfast_configuration"].get("keep_time", False):
+                raise ValueError(
+                    "OpenFAST mooring fatigue requires General.openfast_configuration.keep_time: true."
+                )
 
         # Environmental Conditions needed regardless of where model comes from
         self.add_input('V_cutin',     val=0.0, units='m/s',      desc='Minimum wind speed where turbine operates (cut-in)')
@@ -296,6 +322,7 @@ class FASTLoadCases(ExplicitComponent):
             if self.options["modeling_options"]["flags"]["mooring"]:
                 n_nodes = mooropt["n_nodes"]
                 n_lines = mooropt["n_lines"]
+                self.add_input("mooring_MBL", val=np.zeros(n_lines), units="N")
                 self.add_input("line_diameter", val=np.zeros(n_lines), units="m")
                 self.add_input("line_mass_density", val=np.zeros(n_lines), units="kg/m")
                 self.add_input("line_stiffness", val=np.zeros(n_lines), units="N")
@@ -344,6 +371,27 @@ class FASTLoadCases(ExplicitComponent):
             self.add_input('monopile_ultstress',   val=np.ones(monlen), units="Pa",   desc='Tower ultimate stress for material')
             self.add_input('monopile_axial_load2stress',   val=np.ones([monlen,6]), units="m**2",  desc='Tower coefficient between axial load and stress S=C^T [Fx-z;Mx-z]')
             self.add_input('monopile_shear_load2stress',   val=np.ones([monlen,6]), units="m**2",  desc='Tower coefficient between shear load and stress S=C^T [Fx-z;Mx-z]')
+
+        elif modopt["flags"]["mooring"]:
+            # Imported decks still receive the current WISDEM mooring geometry and resistance.
+            mooropt = modopt["mooring"]
+            n_nodes, n_lines = mooropt["n_nodes"], mooropt["n_lines"]
+            self.add_input("mooring_MBL", val=np.zeros(n_lines), units="N")
+            self.add_input("line_diameter", val=np.zeros(n_lines), units="m")
+            self.add_input("line_mass_density", val=np.zeros(n_lines), units="kg/m")
+            self.add_input("line_stiffness", val=np.zeros(n_lines), units="N")
+            self.add_input("line_transverse_added_mass", val=np.zeros(n_lines), units="kg/m")
+            self.add_input("line_tangential_added_mass", val=np.zeros(n_lines), units="kg/m")
+            self.add_input("line_transverse_drag", val=np.zeros(n_lines))
+            self.add_input("line_tangential_drag", val=np.zeros(n_lines))
+            self.add_input("nodes_location_full", val=np.zeros((n_nodes, 3)), units="m")
+            self.add_input("nodes_mass", val=np.zeros(n_nodes), units="kg")
+            self.add_input("nodes_volume", val=np.zeros(n_nodes), units="m**3")
+            self.add_input("nodes_added_mass", val=np.zeros(n_nodes))
+            self.add_input("nodes_drag_area", val=np.zeros(n_nodes), units="m**2")
+            self.add_input("unstretched_length", val=np.zeros(n_lines), units="m")
+            self.add_discrete_input("node_names", val=[""] * n_nodes)
+            self.add_input('lifetime', val=25.0, units='yr', desc='Turbine design lifetime')
         
 
         # TMD params
@@ -499,6 +547,15 @@ class FASTLoadCases(ExplicitComponent):
         self.add_output('Std_PtfmPitch', val=0.0, units='deg', desc='standard deviation of platform pitch angle')
         self.add_output('Max_Offset', val=0.0, units='m', desc='Maximum distance in surge/sway direction')
 
+        if modopt["flags"]["mooring"]:
+            self.add_output("Max_MoorLineTension", val=np.zeros(self.n_mooring_lines), units="N")
+            self.add_output("moor_axial_load_ratio", val=np.zeros(self.n_mooring_lines))
+            if self.mooring_fatigue_active:
+                fatigue_shape = (self.n_mooring_lines, len(self.mooring_fatigue_stations))
+                self.add_output("mooring_fatigue_load_sum", val=np.zeros(fatigue_shape))
+                self.add_output("mooring_fatigue_damage", val=np.zeros(fatigue_shape))
+                self.add_output("mooring_fatigue_constr", val=np.zeros(fatigue_shape))
+
         # Fatigue output
         self.add_output('damage_blade_root_sparU', val=0.0, desc="Miner's rule cumulative damage to upper spar cap at blade root")
         self.add_output('damage_blade_root_sparL', val=0.0, desc="Miner's rule cumulative damage to lower spar cap at blade root")
@@ -614,6 +671,8 @@ class FASTLoadCases(ExplicitComponent):
             modopts_no_defaults['OpenFAST'].update(modopts_no_defaults['Level3'])
 
         fst_vt = self.load_FAST_model_opts(fst_vt,modopts_no_defaults)
+        if modopt['OpenFAST']['from_openfast'] and modopt["flags"]["mooring"]:
+            fst_vt = self._update_moordyn_model(fst_vt, inputs, discrete_inputs, imported=True)
                 
                 
         if self.model_only == True:
@@ -833,7 +892,9 @@ class FASTLoadCases(ExplicitComponent):
 
         if 'ElastoDynTower' in modeling_options['OpenFAST']:   
             for key in modeling_options['OpenFAST']['ElastoDynTower']:
-                fst_vt['ElastoDynTower'][key] = modeling_options['OpenFAST']['ElastoDynTower'][key]
+                value = modeling_options['OpenFAST']['ElastoDynTower'][key]
+                if value is not None:
+                    fst_vt['ElastoDynTower'][key] = value
 
         if 'AeroDyn' in modeling_options['OpenFAST']: 
             for key in modeling_options['OpenFAST']['AeroDyn']:
@@ -878,7 +939,16 @@ class FASTLoadCases(ExplicitComponent):
 
         if 'MoorDyn' in modeling_options['OpenFAST']:    
             for key in modeling_options['OpenFAST']['MoorDyn']:
-                fst_vt['MoorDyn'][key] = modeling_options['OpenFAST']['MoorDyn'][key]
+                if key == 'NumSegs' and self.options['modeling_options']['OpenFAST']['from_openfast']:
+                    continue
+                if key == 'NumSegs':
+                    fst_vt['MoorDyn'][key] = np.full(
+                        self.n_mooring_lines,
+                        int(modeling_options['OpenFAST']['MoorDyn'][key]),
+                        dtype=np.int64,
+                    )
+                else:
+                    fst_vt['MoorDyn'][key] = modeling_options['OpenFAST']['MoorDyn'][key]
         
         if 'outlist' in modeling_options['OpenFAST']:
             for key1 in modeling_options['OpenFAST']['outlist']:
@@ -903,6 +973,96 @@ class FASTLoadCases(ExplicitComponent):
         if fst_vt['Fst']['DT_Out'] == 0.:
             fst_vt['Fst']['DT_Out'] = 'Default'
 
+        return fst_vt
+
+    def _update_moordyn_model(self, fst_vt, inputs, discrete_inputs, imported=False):
+        """Rebuild MoorDyn and MAP from the current OpenMDAO mooring inputs."""
+        mooropt = self.options['modeling_options']["mooring"]
+        n_lines, n_nodes = mooropt["n_lines"], mooropt["n_nodes"]
+        node_names = list(discrete_inputs["node_names"])
+        if len(node_names) != n_nodes or len(set(node_names)) != n_nodes:
+            raise ValueError("Mooring node names must be complete and unique.")
+        node_index = {name: i for i, name in enumerate(node_names)}
+        line_names = [f"line{i}" for i in range(n_lines)]
+
+        md = fst_vt.setdefault('MoorDyn', {})
+        if imported:
+            num_segs = np.asarray(md.get('NumSegs', []), dtype=float)
+            if num_segs.size != n_lines:
+                raise ValueError(
+                    f"Imported MoorDyn deck must provide exactly one NumSegs value per line; "
+                    f"expected {n_lines}, got {num_segs.size}."
+                )
+            if np.any(~np.isfinite(num_segs)) or np.any(num_segs <= 0.0) or np.any(~np.isclose(num_segs, np.round(num_segs))):
+                raise ValueError("Every imported MoorDyn NumSegs value must be a usable positive integer.")
+            num_segs = np.round(num_segs).astype(np.int64)
+        else:
+            configured_num_segs = self.options['modeling_options']['OpenFAST']['MoorDyn']['NumSegs']
+            num_segs = np.full(n_lines, int(configured_num_segs), dtype=np.int64)
+
+        md['NTypes'] = n_lines
+        md['Name'] = line_names
+        md['Diam'] = np.asarray(inputs["line_diameter"]).copy()
+        md['MassDen'] = np.asarray(inputs["line_mass_density"]).copy()
+        md['EA'] = np.asarray(inputs["line_stiffness"]).copy()
+        md['EI'] = np.zeros(n_lines)
+        md['BA_zeta'] = -np.ones(n_lines, dtype=np.int64)
+        md['Ca'] = np.asarray(inputs["line_transverse_added_mass"]).copy()
+        md['CaAx'] = np.asarray(inputs["line_tangential_added_mass"]).copy()
+        md['Cd'] = np.asarray(inputs["line_transverse_drag"]).copy()
+        md['CdAx'] = np.asarray(inputs["line_tangential_drag"]).copy()
+
+        md['NConnects'] = n_nodes
+        md['Point_ID'] = np.arange(n_nodes) + 1
+        md['Attachment'] = list(mooropt["node_type"])
+        locations = np.asarray(inputs['nodes_location_full'])
+        md['X'], md['Y'], md['Z'] = locations[:, 0].copy(), locations[:, 1].copy(), locations[:, 2].copy()
+        md['M'] = np.asarray(inputs['nodes_mass']).copy()
+        md['V'] = np.asarray(inputs['nodes_volume']).copy()
+        md['CdA'] = np.asarray(inputs['nodes_drag_area']).copy()
+        md['CA'] = np.asarray(inputs['nodes_added_mass']).copy()
+
+        md['NLines'] = n_lines
+        md['Line_ID'] = np.arange(n_lines) + 1
+        md['LineType'] = line_names
+        md['UnstrLen'] = np.asarray(inputs['unstretched_length']).copy()
+        md['NumSegs'] = num_segs
+        md['AttachA'] = np.zeros(n_lines, dtype=np.int64)
+        md['AttachB'] = np.zeros(n_lines, dtype=np.int64)
+        md['Outputs'] = ['-'] * n_lines
+        md['CtrlChan'] = np.zeros(n_lines, dtype=np.int64)
+        md['ChannelID'] = []
+
+        for i, (node1, node2) in enumerate(zip(mooropt["node1"], mooropt["node2"])):
+            if node1 not in node_index or node2 not in node_index:
+                raise ValueError(f"Mooring line {i + 1} references an unknown node.")
+            id1, id2 = node_index[node1], node_index[node2]
+            type1, type2 = str(md['Attachment'][id1]).lower(), str(md['Attachment'][id2]).lower()
+            fixed1, fixed2 = type1.startswith('fix'), type2.startswith('fix')
+            vessel1, vessel2 = type1 == 'vessel', type2 == 'vessel'
+            if fixed1 and vessel2:
+                md['AttachA'][i], md['AttachB'][i] = id1 + 1, id2 + 1
+            elif vessel1 and fixed2:
+                md['AttachA'][i], md['AttachB'][i] = id2 + 1, id1 + 1
+            else:
+                raise ValueError(
+                    f"Mooring line {i + 1} must connect exactly one fixed node and one vessel node; "
+                    f"got {type1!r} and {type2!r}."
+                )
+
+        map_vt = {key: copy.copy(value) for key, value in md.items()}
+        map_vt['Attachment'] = ['fix' if str(value).lower().startswith('fix') else value for value in md['Attachment']]
+        map_vt['LineType'] = line_names
+        map_vt['Diam'] = md['Diam'].copy()
+        map_vt['MassDenInAir'] = md['MassDen'].copy()
+        map_vt['CB'] = np.ones(n_lines)
+        map_vt['CIntDamp'] = np.zeros(n_lines)
+        map_vt['Ca'] = np.zeros(n_lines)
+        map_vt['Cdn'] = np.zeros(n_lines)
+        map_vt['Cdt'] = np.zeros(n_lines)
+        map_vt['B'] = np.zeros(n_nodes)
+        map_vt['Option'] = ["outer_tol 1e-5"]
+        fst_vt['MAP'] = map_vt
         return fst_vt
 
     def update_FAST_model(self, fst_vt, inputs, discrete_inputs):
@@ -1544,87 +1704,8 @@ class FASTLoadCases(ExplicitComponent):
             fst_vt['HydroDyn']['PtfmVol0'] = [float(inputs['platform_displacement'])] 
 
 
-        # Moordyn inputs
         if modopt["flags"]["mooring"]:
-            mooropt = modopt["mooring"]
-            
-            # Line types
-            # Creating a line type for each line, regardless of whether it is unique or not
-            n_lines = mooropt["n_lines"]
-            line_names = ['line'+str(m) for m in range(n_lines)]
-            fst_vt['MoorDyn']['NTypes'] = n_lines
-            fst_vt['MoorDyn']['Name'] = fst_vt['MAP']['LineType'] = line_names
-            fst_vt['MoorDyn']['Diam'] = fst_vt['MAP']['Diam'] = inputs["line_diameter"]
-            fst_vt['MoorDyn']['MassDen'] = fst_vt['MAP']['MassDenInAir'] = inputs["line_mass_density"]
-            fst_vt['MoorDyn']['EA'] = inputs["line_stiffness"]
-            fst_vt['MoorDyn']['EI'] = np.zeros(n_lines)     # MoorPy does not have EI, yet
-            fst_vt['MoorDyn']['BA_zeta'] = -1*np.ones(n_lines, dtype=np.int64)
-            fst_vt['MoorDyn']['Ca'] = inputs["line_transverse_added_mass"]
-            fst_vt['MoorDyn']['CaAx'] = inputs["line_tangential_added_mass"]
-            fst_vt['MoorDyn']['Cd'] = inputs["line_transverse_drag"]
-            fst_vt['MoorDyn']['CdAx'] = inputs["line_tangential_drag"]
-
-            # Connection properties - Points
-            n_nodes = mooropt["n_nodes"]
-            fst_vt['MoorDyn']['NConnects'] = n_nodes
-            fst_vt['MoorDyn']['Point_ID'] = np.arange(n_nodes)+1
-            fst_vt['MoorDyn']['Attachment'] = mooropt["node_type"][:]
-            fst_vt['MoorDyn']['X'] = inputs['nodes_location_full'][:,0]
-            fst_vt['MoorDyn']['Y'] = inputs['nodes_location_full'][:,1]
-            fst_vt['MoorDyn']['Z'] = inputs['nodes_location_full'][:,2]
-            fst_vt['MoorDyn']['M'] = inputs['nodes_mass']
-            fst_vt['MoorDyn']['V'] = inputs['nodes_volume']
-            fst_vt['MoorDyn']['CdA'] = inputs['nodes_drag_area']
-            fst_vt['MoorDyn']['CA'] = inputs['nodes_added_mass']
-
-            # Lines
-            fst_vt['MoorDyn']['NLines'] = n_lines
-            fst_vt['MoorDyn']['Line_ID'] = np.arange(n_lines)+1
-            fst_vt['MoorDyn']['LineType'] = line_names
-            fst_vt['MoorDyn']['UnstrLen'] = inputs['unstretched_length']
-            fst_vt['MoorDyn']['NumSegs'] = 50*np.ones(n_lines, dtype=np.int64)      # TODO: make this a modeling option
-            fst_vt['MoorDyn']['AttachA'] = np.zeros(n_lines, dtype=np.int64)
-            fst_vt['MoorDyn']['AttachB'] = np.zeros(n_lines, dtype=np.int64)
-            fst_vt['MoorDyn']['Outputs'] = ['-'] * n_lines
-            fst_vt['MoorDyn']['CtrlChan'] = np.zeros(n_lines, dtype=np.int64)
-
-            for k in range(n_lines):
-                id1 = discrete_inputs['node_names'].index( mooropt["node1"][k] )
-                id2 = discrete_inputs['node_names'].index( mooropt["node2"][k] )
-                if (fst_vt['MoorDyn']['Attachment'][id1].lower() == 'vessel' and
-                    fst_vt['MoorDyn']['Attachment'][id2].lower().find('fix') >= 0):
-                    fst_vt['MoorDyn']['AttachB'][k] = id1+1
-                    fst_vt['MoorDyn']['AttachA'][k] = id2+1
-                elif (fst_vt['MoorDyn']['Attachment'][id2].lower() == 'vessel' and
-                    fst_vt['MoorDyn']['Attachment'][id1].lower().find('fix') >= 0):
-                    fst_vt['MoorDyn']['AttachB'][k] = id2+1
-                    fst_vt['MoorDyn']['AttachA'][k] = id1+1
-                else:
-                    logger.warning(discrete_inputs['node_names'])
-                    logger.warning(mooropt["node1"][k], mooropt["node2"][k])
-                    logger.warning(fst_vt['MoorDyn']['Attachment'][id1], fst_vt['MoorDyn']['Attachment'][id2])
-                    raise ValueError('Mooring line seems to be between unknown endpoint types.')
-
-            # MoorDyn Control - Optional
-            fst_vt['MoorDyn']['ChannelID'] = []
-            
-            # MAP - linearization only
-            for key in fst_vt['MoorDyn']:
-                fst_vt['MAP'][key] = copy.copy(fst_vt['MoorDyn'][key])
-
-            for idx, node_type in enumerate(fst_vt['MAP']['Attachment']):
-                if node_type == 'fixed':
-                    fst_vt['MAP']['Attachment'][idx] = 'fix'
-
-            # TODO: FIXME: these values are hardcoded for the IEA15MW linearization studies
-            fst_vt['MAP']['LineType'] = ['main', 'main', 'main']
-            fst_vt['MAP']['CB'] = np.ones(n_lines)
-            fst_vt['MAP']['CIntDamp'] = np.zeros(n_lines)
-            fst_vt['MAP']['Ca'] = np.zeros(n_lines)
-            fst_vt['MAP']['Cdn'] = np.zeros(n_lines)
-            fst_vt['MAP']['Cdt'] = np.zeros(n_lines)
-            fst_vt['MAP']['B'] = np.zeros( n_nodes )
-            fst_vt['MAP']['Option'] = ["outer_tol 1e-5"]
+            fst_vt = self._update_moordyn_model(fst_vt, inputs, discrete_inputs, imported=False)
 
 
         # Structural Control
@@ -1778,6 +1859,27 @@ class FASTLoadCases(ExplicitComponent):
         if modopt['flags']['floating']:
             channels_out += ["PtfmPitch", "PtfmRoll", "PtfmYaw", "PtfmSurge", "PtfmSway", "PtfmHeave"]
 
+        if modopt['flags']['mooring']:
+            moordyn_channels = [f"FairTen{i + 1}" for i in range(self.n_mooring_lines)]
+            if self.mooring_fatigue_active:
+                num_segs = fst_vt['MoorDyn'].get('NumSegs', [])
+                if len(num_segs) != self.n_mooring_lines:
+                    raise ValueError("MoorDyn NumSegs must contain exactly one value per mooring line.")
+                fatigue_channels = [
+                    moordyn_fatigue_channel(i + 1, station, num_segs[i])
+                    for i in range(self.n_mooring_lines)
+                    for station in self.mooring_fatigue_stations
+                ]
+                moordyn_channels += [
+                    channel.replace("ANCHTEN", "AnchTen").replace("FAIRTEN", "FairTen")
+                    for channel in fatigue_channels
+                ]
+            # MoorDyn node-tension channels are dynamic and are not all present
+            # in OpenFAST_IO's predefined outlist.
+            for channel in moordyn_channels:
+                fst_vt['outlist']['MoorDyn'].setdefault(channel, False)
+            channels_out += moordyn_channels
+
         # Structural Control Channels
         if modopt['flags']['TMDs']:
             for i_SStC in range(len(fst_vt['SStC'])):
@@ -1802,6 +1904,40 @@ class FASTLoadCases(ExplicitComponent):
             channels[var] = True
 
         return channels
+
+    def _register_fast_cases(self, case_names, dlc_generator):
+        if len(case_names) != dlc_generator.n_cases:
+            raise RuntimeError(
+                f"Generated {len(case_names)} OpenFAST case names for {dlc_generator.n_cases} global DLC cases."
+            )
+        names = tuple(str(name) for name in case_names)
+        if not names or len(set(names)) != len(names):
+            raise ValueError("OpenFAST case names must be non-empty and unique.")
+        self._fast_case_name_to_id = {name: i for i, name in enumerate(names)}
+        self._fast_case_name_to_dlc = {name: str(dlc_generator.cases[i].label) for i, name in enumerate(names)}
+
+    def _fast_case_id(self, name):
+        name = str(name)
+        if name not in self._fast_case_name_to_id:
+            raise RuntimeError(f"Unknown OpenFAST case name {name!r}; it has no global DLC identity.")
+        return self._fast_case_name_to_id[name]
+
+    def _fast_result_row_map(self, table, table_name):
+        case_ids = [self._fast_case_id(name) for name in table.index]
+        if len(set(case_ids)) != len(case_ids):
+            raise RuntimeError(f"{table_name} contains duplicate OpenFAST case identities.")
+        return {case_id: row for row, case_id in enumerate(case_ids)}
+
+    def _fast_timeseries_map(self, chan_time):
+        mapping = {}
+        for time_series in chan_time:
+            if time_series is None or not hasattr(time_series, 'case_name'):
+                raise RuntimeError("Retained OpenFAST time series is missing its exact case_name identity.")
+            case_id = self._fast_case_id(time_series.case_name)
+            if case_id in mapping:
+                raise RuntimeError(f"Duplicate retained OpenFAST time series for case {time_series.case_name!r}.")
+            mapping[case_id] = time_series
+        return mapping
 
     def run_FAST(self, inputs, discrete_inputs, fst_vt):
 
@@ -1956,6 +2092,8 @@ class FASTLoadCases(ExplicitComponent):
             # Extend lists of cases
             case_list.extend(case_list_i)
             case_name.extend(case_name_i)
+
+        self._register_fast_cases(case_name, dlc_generator)
 
         # Apply wind files to case_list (this info will be in combined case matrix, but not individual DLCs)
         for case_i, wt, wf in zip(case_list,WindFile_type,WindFile_name):
@@ -2171,6 +2309,113 @@ class FASTLoadCases(ExplicitComponent):
 
         return summary_stats, extreme_table, DELs, Damage, case_list, case_name, chan_time, dlc_generator
 
+    def _mooring_case_sets(self, dlc_generator):
+        labels = [str(case.label) for case in dlc_generator.cases]
+        uls_ids = select_uls_case_ids(
+            labels, self.mooring_fatigue_constraint_options.get("uls_dlc", [])
+        )
+        if not self.mooring_fatigue_active:
+            return uls_ids, ()
+        custom_ids = tuple(i for i, label in enumerate(labels) if label == "Custom")
+        probabilities = []
+        for case_id in custom_ids:
+            probability = float(dlc_generator.cases[case_id].probability)
+            if not np.isfinite(probability) or probability < 0.0:
+                raise ValueError(
+                    f"Custom DLC case {case_id} probability must be finite and non-negative; got {probability!r}."
+                )
+            probabilities.append(probability)
+        fatigue_ids = tuple(case_id for case_id, probability in zip(custom_ids, probabilities) if probability > 0.0)
+        if self.mooring_fatigue_active and not fatigue_ids:
+            raise ValueError("OpenFAST mooring fatigue requires at least one positive-probability Custom DLC case.")
+        return uls_ids, fatigue_ids
+
+    def _get_mooring_loading(self, summary_stats, chan_time, dlc_generator, inputs, outputs):
+        uls_ids, fatigue_ids = self._mooring_case_sets(dlc_generator)
+        row_map = self._fast_result_row_map(summary_stats, "OpenFAST summary statistics")
+        failed_ids = {
+            self._fast_case_id(name)
+            for name, failed in zip(summary_stats.index, summary_stats['openfast_failed']['mean'])
+            if failed > 0
+        }
+        uls_rows = [row_map[case_id] for case_id in uls_ids if case_id in row_map and case_id not in failed_ids]
+        if not uls_rows:
+            raise RuntimeError("No selected OpenFAST cases are available for mooring ULS evaluation.")
+        selected = summary_stats.iloc[uls_rows]
+        for i_line in range(self.n_mooring_lines):
+            channel = f"FAIRTEN{i_line + 1}"
+            if channel not in selected.columns.get_level_values(0):
+                raise KeyError(f'Missing required OpenFAST MoorDyn ULS channel "{channel}".')
+            value = np.max(np.asarray(selected[channel]["max"], dtype=float))
+            if not np.isfinite(value):
+                raise ValueError(f'Non-finite OpenFAST mooring ULS result in "{channel}".')
+            outputs["Max_MoorLineTension"][i_line] = value
+
+        mbl_n = np.asarray(inputs["mooring_MBL"], dtype=float)
+        if mbl_n.size != self.n_mooring_lines or np.any(~np.isfinite(mbl_n)) or np.any(mbl_n <= 0.0):
+            raise ValueError("All mooring MBL values must be finite, positive, and match the number of lines.")
+        outputs["moor_axial_load_ratio"] = 2.4 * np.asarray(outputs["Max_MoorLineTension"]) / mbl_n
+
+        if not self.mooring_fatigue_active:
+            return outputs
+        failed_fatigue = sorted(set(fatigue_ids).intersection(failed_ids))
+        if failed_fatigue:
+            logger.warning(
+                "OpenFAST mooring fatigue Custom cases failed and will be excluded without "
+                "renormalizing probabilities: %s.", failed_fatigue
+            )
+            fatigue_ids = tuple(case_id for case_id in fatigue_ids if case_id not in failed_ids)
+        if not fatigue_ids:
+            fail_value = float(
+                self.options['modeling_options']['General']['openfast_configuration']['fail_value']
+            )
+            logger.warning(
+                "All positive-probability OpenFAST mooring fatigue Custom cases failed; "
+                "fatigue outputs are set to the configured fail_value %.6g.", fail_value
+            )
+            for name in ("mooring_fatigue_load_sum", "mooring_fatigue_damage", "mooring_fatigue_constr"):
+                outputs[name] = np.full_like(outputs[name], fail_value, dtype=float)
+            return outputs
+        time_series_map = self._fast_timeseries_map(chan_time)
+        missing = [case_id for case_id in fatigue_ids if case_id not in time_series_map]
+        if missing:
+            raise RuntimeError(f"Required OpenFAST mooring fatigue time series are missing: {missing}.")
+
+        num_segs = np.asarray(self.fst_vt['MoorDyn']['NumSegs'])
+        histories, probabilities, times = [], [], []
+        for case_id in fatigue_ids:
+            time_series = time_series_map[case_id]
+            if "Time" not in time_series:
+                raise KeyError(f"OpenFAST fatigue case {case_id} is missing the Time channel.")
+            time = np.asarray(time_series["Time"], dtype=float)
+            tensions = np.empty((self.n_mooring_lines, len(self.mooring_fatigue_stations), time.size))
+            for i_line in range(self.n_mooring_lines):
+                for i_station, station in enumerate(self.mooring_fatigue_stations):
+                    channel = moordyn_fatigue_channel(i_line + 1, station, num_segs[i_line])
+                    if channel not in time_series:
+                        raise KeyError(f'Missing required OpenFAST MoorDyn fatigue channel "{channel}".')
+                    # MoorDyn tension outputs are in N; the shared T-N calculation uses kN.
+                    tensions[i_line, i_station] = np.asarray(time_series[channel], dtype=float) * 1.0e-3
+            histories.append(tensions)
+            probabilities.append(float(dlc_generator.cases[case_id].probability))
+            times.append(time)
+
+        load_sum = fatigue_load_sum(
+            histories, probabilities, times, self.mooring_fatigue_options.get("tn_m", 3.0)
+        )
+        damage, constraint = fatigue_damage(
+            load_sum,
+            mbl_n,
+            self.mooring_fatigue_options.get("tn_k", 316.0),
+            self.mooring_fatigue_options.get("tn_m", 3.0),
+            float(np.atleast_1d(inputs["lifetime"])[0]),
+            self.mooring_fatigue_constraint_options.get("fatigue_design_factor", 3.0),
+        )
+        outputs["mooring_fatigue_load_sum"] = load_sum
+        outputs["mooring_fatigue_damage"] = damage
+        outputs["mooring_fatigue_constr"] = constraint
+        return outputs
+
     def post_process(self, summary_stats, extreme_table, DELs, damage, case_list, dlc_generator, chan_time, inputs, discrete_inputs, outputs, discrete_outputs):
         modopt = self.options['modeling_options']
 
@@ -2188,6 +2433,9 @@ class FASTLoadCases(ExplicitComponent):
             outputs, discrete_outputs = self.calculate_AEP(summary_stats, case_list, dlc_generator, discrete_inputs, outputs, discrete_outputs)
 
         outputs, discrete_outputs = self.get_weighted_DELs(dlc_generator, DELs, damage, discrete_inputs, outputs, discrete_outputs)
+
+        if modopt['flags']['mooring']:
+            outputs = self._get_mooring_loading(summary_stats, chan_time, dlc_generator, inputs, outputs)
         
         if bool(self.fst_vt['Fst']['CompAero']):
             outputs, discrete_outputs = self.get_control_measures(summary_stats, chan_time, inputs, discrete_inputs, outputs, discrete_outputs)

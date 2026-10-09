@@ -1657,6 +1657,34 @@ properties:
                         default: 1.0
                         unit: none
                         description: Factor to adjust tower side-to-side stiffness (-)
+                    TwFAM1Sh:
+                        type: [array, "null"]
+                        minItems: 5
+                        maxItems: 5
+                        items:
+                            type: number
+                        description: Optional first fore-aft tower mode-shape coefficients for the x^2 through x^6 terms. When provided, these values override the coefficients calculated by WEIS.
+                    TwFAM2Sh:
+                        type: [array, "null"]
+                        minItems: 5
+                        maxItems: 5
+                        items:
+                            type: number
+                        description: Optional second fore-aft tower mode-shape coefficients for the x^2 through x^6 terms. When provided, these values override the coefficients calculated by WEIS.
+                    TwSSM1Sh:
+                        type: [array, "null"]
+                        minItems: 5
+                        maxItems: 5
+                        items:
+                            type: number
+                        description: Optional first side-to-side tower mode-shape coefficients for the x^2 through x^6 terms. When provided, these values override the coefficients calculated by WEIS.
+                    TwSSM2Sh:
+                        type: [array, "null"]
+                        minItems: 5
+                        maxItems: 5
+                        items:
+                            type: number
+                        description: Optional second side-to-side tower mode-shape coefficients for the x^2 through x^6 terms. When provided, these values override the coefficients calculated by WEIS.
             BeamDyn: &ofbeamdyn
                 type: object
                 default: {}
@@ -2198,6 +2226,11 @@ properties:
                 type: object
                 default: {}
                 properties:
+                    NumSegs:
+                        type: integer
+                        default: 50
+                        minimum: 1
+                        description: Number of segments per generated MoorDyn line. Imported decks retain their per-line values.
                     Echo: *echo
                     dtM:
                         type: number

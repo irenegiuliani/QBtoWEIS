@@ -19,8 +19,9 @@ from weis.aeroelasticse.openfast_library import FastLibAPI
 
 import numpy as np
 
-# Realpath will resolve symlinks
-of_path = os.path.realpath( shutil.which('openfast') )
+# Realpath will resolve symlinks when OpenFAST is available on PATH.
+_openfast_on_path = shutil.which('openfast')
+of_path = os.path.realpath(_openfast_on_path) if _openfast_on_path else 'openfast'
 bin_dir  = os.path.dirname(of_path)
 lib_dir  = os.path.abspath( os.path.join(os.path.dirname(bin_dir), 'lib') )
 
@@ -59,6 +60,14 @@ magnitude_channels_default = {
     'TipDc3': ['TipDxc3', 'TipDyc3', 'TipDzc3'],
     'TwrBsM': ['TwrBsMxt', 'TwrBsMyt', 'TwrBsMzt'],
 }
+
+
+class FASTTimeSeries(dict):
+    """Dictionary-compatible retained time series carrying its exact FAST case name."""
+
+    def __init__(self, case_name, data):
+        super().__init__(data)
+        self.case_name = str(case_name)
 
 fatigue_channels_default = {
     'RootMc1': FatigueParams(slope=10),
@@ -271,7 +280,7 @@ class runFAST_pywrapper(object):
                 for module in self.fst_vt['outlist']:
                     for channel in self.fst_vt['outlist'][module]:
                         if self.fst_vt['outlist'][module][channel]:
-                            output_dict[channel] = np.full(len(output_dict['Time']),fill_value=self.fail_value, dtype=np.uint8) 
+                            output_dict[channel] = np.full(len(output_dict['Time']), fill_value=self.fail_value, dtype=float)
 
                 # Add channel to indicate failed run
                 output_dict['openfast_failed'] = np.ones(len(output_dict['Time']), dtype=np.uint8)
@@ -290,6 +299,12 @@ class runFAST_pywrapper(object):
                                                                                return_damage=True,
                                                                                goodman_correction=self.goodman)
 
+        if str(case_name) != str(self.FAST_namingOut):
+            raise RuntimeError(
+                f"OpenFAST result identity mismatch: expected {self.FAST_namingOut!r}, got {case_name!r}."
+            )
+        if output_dict is not None:
+            output_dict = FASTTimeSeries(self.FAST_namingOut, output_dict)
         return case_name, sum_stats, extremes, dels, damage, output_dict
 
 

@@ -1137,6 +1137,44 @@ properties:
                 type: boolean
                 default: True
                 description: Save error timeseries?
+    MooringsFatigue:
+        type: object
+        default: {}
+        description: Solver-independent physical definition of mooring tension-tension fatigue.
+        allOf:
+            - if:
+                  properties:
+                      flag:
+                          const: true
+                  required: [flag]
+              then:
+                  properties:
+                      stations:
+                          minItems: 1
+        properties:
+            flag:
+                type: boolean
+                default: False
+                description: Enable mooring fatigue calculations.
+            stations:
+                type: array
+                default: []
+                minItems: 0
+                description: Normalized physical positions along every line, with 0 at the fixed anchor and 1 at the vessel/fairlead.
+                items:
+                    type: number
+                    minimum: 0.0
+                    maximum: 1.0
+            tn_k:
+                type: number
+                default: 316.0
+                exclusiveMinimum: 0.0
+                description: Mooring tension-tension fatigue curve coefficient.
+            tn_m:
+                type: number
+                default: 3.0
+                exclusiveMinimum: 0.0
+                description: Mooring tension-tension fatigue curve exponent.
     TowerFatigue:
         type: object
         default: {}

@@ -586,14 +586,13 @@ properties:
                                 type: number
                                 default: 3.0
                                 minimum: 1.0
-                            tn_k:
-                                type: number
-                                default: 316.0
-                                minimum: 1.e-12
-                            tn_m:
-                                type: number
-                                default: 3.0
-                                minimum: 1.e-12
+                            uls_dlc:
+                                type: array
+                                default: []
+                                description: Optional DLC labels used for mooring ULS. By default all non-Custom DLCs are used, or Custom DLCs if no non-Custom cases exist.
+                                items:
+                                    type: string
+                                uniqueItems: true
             openfast_failed:
                 type: object
                 default: {}

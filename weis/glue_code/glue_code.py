@@ -18,8 +18,7 @@ from wisdem.rotorse.rotor_power import NoStallConstraint
 from weis.control.tune_rosco import ServoSE_ROSCO, ROSCO_Turbine
 #from wisdem.rotorse.rotor_elasticity import RotorElasticity
 from weis.aeroelasticse.utils import RotorLoadsDeflStrainsWEIS
-from wisdem.glue_code.gc_RunTools import Convergence_Trends_Opt
-from weis.glue_code.gc_RunTools import Outputs_2_Screen
+from weis.glue_code.gc_RunTools import Convergence_Trends_Opt, Outputs_2_Screen
 from weis.frequency.raft_wrapper import RAFT_WEIS
 from weis.control.tmd import TMD_group
 from rosco.toolbox.inputs.validation import load_rosco_yaml
@@ -624,22 +623,6 @@ class WindPark(om.Group):
                 self.connect('sse_tune.aeroperf_tables.Cq',     'aeroelastic.Cq_aero_table')
                 self.connect('xf.flap_angles',                  'aeroelastic.airfoils_UserProp')
 
-                if modeling_options['flags']['mooring']:
-                    self.connect("mooring.line_diameter", "aeroelastic.line_diameter")
-                    self.connect("mooring.line_mass_density", "aeroelastic.line_mass_density")
-                    self.connect("mooring.line_stiffness", "aeroelastic.line_stiffness")
-                    self.connect("mooring.line_transverse_added_mass", "aeroelastic.line_transverse_added_mass")
-                    self.connect("mooring.line_tangential_added_mass", "aeroelastic.line_tangential_added_mass")
-                    self.connect("mooring.line_transverse_drag", "aeroelastic.line_transverse_drag")
-                    self.connect("mooring.line_tangential_drag", "aeroelastic.line_tangential_drag")
-                    self.connect("mooring.mooring_nodes", "aeroelastic.nodes_location_full")
-                    self.connect("mooring.nodes_mass", "aeroelastic.nodes_mass")
-                    self.connect("mooring.nodes_volume", "aeroelastic.nodes_volume")
-                    self.connect("mooring.nodes_added_mass", "aeroelastic.nodes_added_mass")
-                    self.connect("mooring.nodes_drag_area", "aeroelastic.nodes_drag_area")
-                    self.connect("mooring.unstretched_length", "aeroelastic.unstretched_length")
-                    self.connect("mooring.node_names", "aeroelastic.node_names")
-            
                 # For fatigue
                 self.connect('configuration.lifetime', 'aeroelastic.lifetime')
                 self.connect('blade.fatigue.sparU_sigma_ult', 'aeroelastic.blade_sparU_ultstress')
@@ -1244,17 +1227,6 @@ class WindPark(om.Group):
                         else:
                             self.connect(f"floatingse.member{k}.outer_diameter",            f"aeroelastic_qblade.member{k}:outer_diameter")
                 
-                    if modeling_options['flags']['mooring']:
-                        self.connect('mooring.line_diameter',               'aeroelastic_qblade.line_diameter')
-                        self.connect('mooring.line_mass_density',           'aeroelastic_qblade.line_mass_density')
-                        self.connect('mooring.line_stiffness',              'aeroelastic_qblade.line_stiffness')
-                        self.connect('mooring.unstretched_length',          'aeroelastic_qblade.unstretched_length')
-                        self.connect('mooring.mooring_nodes',               'aeroelastic_qblade.nodes_location_full')
-                        self.connect('mooring.line_transverse_added_mass',  'aeroelastic_qblade.line_transverse_added_mass')
-                        self.connect('mooring.line_transverse_drag',        'aeroelastic_qblade.line_transverse_drag')
-                        self.connect('mooring.node_names',                  'aeroelastic_qblade.node_names')
-                        self.connect('mooring.line_breaking_load',          'aeroelastic_qblade.mooring_MBL')
-                    
                 # For fatigue
                 self.connect('configuration.lifetime',                              'aeroelastic_qblade.lifetime')
                 self.connect('blade.fatigue.sparU_sigma_ult',                       'aeroelastic_qblade.blade_sparU_ultstress')
@@ -1475,3 +1447,33 @@ class WindPark(om.Group):
                 self.connect('tune_rosco_ivc.IPC_Kp1p',        'outputs_2_screen_weis.IPC_Kp1p')
                 self.connect('tune_rosco_ivc.IPC_Ki1p',        'outputs_2_screen_weis.IPC_Ki1p')
                 self.connect('dac_ivc.te_flap_end',            'outputs_2_screen_weis.te_flap_end')
+
+        # The active aeroelastic solver receives the complete current mooring model.
+        if modeling_options['flags']['mooring']:
+            if modeling_options['OpenFAST']['flag'] or modeling_options['OpenFAST_Linear']['flag']:
+                mooring_target = 'aeroelastic'
+            elif modeling_options['QBlade']['flag'] and not modeling_options['QBlade']['from_qblade']:
+                mooring_target = 'aeroelastic_qblade'
+            else:
+                mooring_target = None
+            if mooring_target is not None:
+                for source, target in (
+                    ('line_diameter', 'line_diameter'),
+                    ('line_mass_density', 'line_mass_density'),
+                    ('line_stiffness', 'line_stiffness'),
+                    ('line_transverse_added_mass', 'line_transverse_added_mass'),
+                    ('line_tangential_added_mass', 'line_tangential_added_mass'),
+                    ('line_transverse_drag', 'line_transverse_drag'),
+                    ('line_tangential_drag', 'line_tangential_drag'),
+                    ('mooring_nodes', 'nodes_location_full'),
+                    ('nodes_mass', 'nodes_mass'),
+                    ('nodes_volume', 'nodes_volume'),
+                    ('nodes_added_mass', 'nodes_added_mass'),
+                    ('nodes_drag_area', 'nodes_drag_area'),
+                    ('unstretched_length', 'unstretched_length'),
+                    ('node_names', 'node_names'),
+                    ('line_breaking_load', 'mooring_MBL'),
+                ):
+                    self.connect(f'mooring.{source}', f'{mooring_target}.{target}')
+                if modeling_options['OpenFAST']['flag'] and modeling_options['OpenFAST']['from_openfast']:
+                    self.connect('configuration.lifetime', 'aeroelastic.lifetime')

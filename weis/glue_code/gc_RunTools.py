@@ -2,7 +2,19 @@ import os
 import matplotlib.pyplot as plt
 import openmdao.api as om
 import numpy as np
+import warnings
 from openmdao.utils.mpi import MPI
+from wisdem.glue_code.gc_RunTools import Convergence_Trends_Opt as _WISDEMConvergenceTrendsOpt
+
+
+class Convergence_Trends_Opt(_WISDEMConvergenceTrendsOpt):
+    """Keep optional convergence plotting from stopping an optimization."""
+
+    def compute(self, inputs, outputs):
+        try:
+            super().compute(inputs, outputs)
+        except IndexError as err:
+            warnings.warn(f"Skipping convergence plots because the recorder metadata is incompatible: {err}")
 
 class Outputs_2_Screen(om.ExplicitComponent):
     # Class to print outputs on screen

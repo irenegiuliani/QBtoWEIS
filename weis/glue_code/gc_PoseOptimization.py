@@ -467,23 +467,24 @@ class PoseOptimizationWEIS(PoseOptimization):
 
         mooring_fatigue_constraint = damage_constraints.get("mooring_fatigue", {})
         if mooring_fatigue_constraint.get("flag", False):
-            if not self.modeling.get("QBlade", {}).get("flag", False):
-                raise ValueError("Mooring fatigue constraint currently requires QBlade.")
+            if not (
+                self.modeling.get("QBlade", {}).get("flag", False)
+                or self.modeling.get("OpenFAST", {}).get("flag", False)
+            ):
+                raise ValueError("Mooring fatigue constraint requires QBlade or OpenFAST.")
 
             if not self.modeling.get("flags", {}).get("mooring", False):
                 raise ValueError("Mooring fatigue constraint requires the mooring model.")
 
-            n_lines = self.modeling["mooring"]["n_lines"]
-            n_stations = len(self.modeling["QBlade"]["QBladeOcean"]["MOO_Sensors_RelPos"])
-            for i_line in range(n_lines):
-                # Each row contains all sensor constraints for one mooring line.
-                wt_opt.model.add_constraint(
-                    f"{self.floating_solve_component}.mooring_fatigue_constr",
-                    indices=np.arange(i_line * n_stations, (i_line + 1) * n_stations),
-                    flat_indices=True,
-                    alias=f"mooring{i_line + 1}_fatigue_constr",
-                    upper=mooring_fatigue_constraint.get("max", 1.0),
+            if not self.modeling.get("MooringsFatigue", {}).get("flag", False):
+                raise ValueError(
+                    "Mooring fatigue constraint requires modeling_options['MooringsFatigue']['flag']=True."
                 )
+
+            wt_opt.model.add_constraint(
+                f"{self.floating_solve_component}.mooring_fatigue_constr",
+                upper=mooring_fatigue_constraint.get("max", 1.0),
+            )
                     
 
         return wt_opt
