@@ -15,7 +15,7 @@ from wisdem.commonse.turbine_constraints  import TurbineConstraints
 from weis.aeroelasticse.openmdao_openfast import FASTLoadCases
 from weis.control.dac import RunXFOIL
 from wisdem.rotorse.rotor_power import NoStallConstraint
-from weis.control.tune_rosco import ServoSE_ROSCO, ROSCO_Turbine
+from weis.control.tune_rosco import ServoSE_ROSCO, ROSCO_Turbine, OpenFASTTurbine
 #from wisdem.rotorse.rotor_elasticity import RotorElasticity
 from weis.aeroelasticse.utils import RotorLoadsDeflStrainsWEIS
 from weis.glue_code.gc_RunTools import Convergence_Trends_Opt, Outputs_2_Screen
@@ -172,6 +172,9 @@ class WindPark(om.Group):
             self.connect("af_3d.cl_corrected", "xf.cl_interp")
             self.connect("af_3d.cd_corrected", "xf.cd_interp")
             self.connect("af_3d.cm_corrected", "xf.cm_interp")
+
+        if modeling_options['OpenFAST']['from_openfast'] and modeling_options['OpenFAST']['use_existing_openfast_controller']:
+            self.add_subsystem('openfast_turbine', OpenFASTTurbine(modeling_options=modeling_options))
 
         # ROSCO can be used at all levels
         if modeling_options['ROSCO']['flag']:
@@ -462,7 +465,7 @@ class WindPark(om.Group):
 
 
 
-            if modeling_options['ROSCO']['flag']==False:
+            if modeling_options['ROSCO']['flag']==False and not modeling_options['OpenFAST']['use_existing_openfast_controller']:
                 raise Exception("ERROR: WISDEM does not support openfast without the tuning of ROSCO")
 
             # Configuration parameters needed if model comes from openfast
@@ -921,10 +924,12 @@ class WindPark(om.Group):
                 self.connect('tower.diameter',                  'tcons_post.outer_diameter_full')
                 
             else:  # connections from outside WISDEM
-                self.connect('rosco_turbine.v_rated',               'aeroelastic.Vrated')
-                self.connect('rosco_turbine.R',                     'aeroelastic.Rtip')
-                self.connect('rosco_turbine.hub_height',            'aeroelastic.hub_height')
-                self.connect('rosco_turbine.twr_freq',              'sse_tune.tune_rosco.twr_freq')
+                turbine_source = 'openfast_turbine' if modeling_options['OpenFAST']['use_existing_openfast_controller'] else 'rosco_turbine'
+                self.connect(f'{turbine_source}.v_rated',            'aeroelastic.Vrated')
+                self.connect(f'{turbine_source}.R',                  'aeroelastic.Rtip')
+                self.connect(f'{turbine_source}.hub_height',         'aeroelastic.hub_height')
+                if not modeling_options['OpenFAST']['use_existing_openfast_controller']:
+                    self.connect('rosco_turbine.twr_freq',           'sse_tune.tune_rosco.twr_freq')
             
             # Inputs to plantfinancese from wt group
             if not modeling_options['OpenFAST']['from_openfast']:

@@ -6,11 +6,14 @@ programmatically with minimal additional dependencies.
 
 import os
 import shutil
+import copy
+import json
 import platform
 import multiprocessing as mp
 
 from openfast_io.FAST_reader import InputReader_OpenFAST
 from openfast_io.FAST_writer import InputWriter_OpenFAST
+from openfast_io.StC_defaults import default_StC_vt
 from weis.aeroelasticse.FAST_wrapper import FAST_wrapper, Turbsim_wrapper, IEC_CoherentGusts
 from weis.aeroelasticse.calculated_channels import calculate_channels
 from pCrunch.io import OpenFASTOutput, OpenFASTBinary, OpenFASTAscii
@@ -142,6 +145,7 @@ class runFAST_pywrapper(object):
         self.allow_fails        = False
         self.fail_value         = 9999
         self.write_stdout       = False
+        self.multiple_loading_files = ''
         
         self.overwrite_outfiles = True   # True: existing output files will be overwritten, False: if output file with the same name already exists, OpenFAST WILL NOT RUN; This is primarily included for code debugging with OpenFAST in the loop or for specific Optimization Workflows where OpenFAST is to be run periodically instead of for every objective function anaylsis
 
@@ -164,6 +168,58 @@ class runFAST_pywrapper(object):
             )
         
     def execute(self):
+
+        if self.multiple_loading_files:
+            self.fst_vt = copy.deepcopy(self.fst_vt)
+            os.makedirs(self.FAST_runDirectory, exist_ok=True)
+            manifest_path = os.path.join(self.multiple_loading_files, 'manifest.json')
+            if not os.path.isfile(manifest_path):
+                raise FileNotFoundError(f"Missing prescribed-load manifest: {manifest_path}")
+            with open(manifest_path, encoding='utf-8') as manifest_file:
+                manifest = json.load(manifest_file)
+            if self.FAST_namingOut not in manifest:
+                raise KeyError(f"No prescribed loads for OpenFAST case {self.FAST_namingOut!r} in {manifest_path}")
+            case_loads = manifest[self.FAST_namingOut]
+            tower_loads = case_loads.get('tower', [])
+            if not isinstance(tower_loads, list) or not tower_loads:
+                raise ValueError(f"Case {self.FAST_namingOut!r} has no distributed tower loads in {manifest_path}")
+
+            load_files = [case_loads['aero'], *[entry['file'] for entry in tower_loads]]
+            local_load_files = []
+            for load_file in load_files:
+                source = os.path.join(self.multiple_loading_files, load_file)
+                if not os.path.isfile(source):
+                    raise FileNotFoundError(f"Missing prescribed-load file for OpenFAST case {self.FAST_namingOut!r}: {source}")
+                destination = os.path.join(self.FAST_runDirectory, os.path.basename(source))
+                if os.path.abspath(source) != os.path.abspath(destination):
+                    shutil.copy2(source, destination)
+                local_load_files.append(os.path.basename(destination))
+
+            servodyn = self.fst_vt['ServoDyn']
+            if int(servodyn.get('NumNStC', 0)) != 1:
+                raise ValueError('OpenFAST.ServoDyn.NumNStC must be 1 when MULTIPLELOADINGFILES is used.')
+            if int(servodyn.get('NumTStC', 0)) != len(tower_loads):
+                raise ValueError(f"OpenFAST.ServoDyn.NumTStC must be {len(tower_loads)}; received {servodyn.get('NumTStC')!r}.")
+            nstc_files = servodyn.get('NStCfiles', [])
+            tstc_files = servodyn.get('TStCfiles', [])
+            if len(nstc_files) != 1 or len(tstc_files) != len(tower_loads):
+                raise ValueError('NStCfiles and TStCfiles must contain NumNStC and NumTStC file names, respectively.')
+            servodyn['NStCfiles'] = [name.format(case_name=self.FAST_namingOut) for name in nstc_files]
+            servodyn['TStCfiles'] = [name.format(case_name=self.FAST_namingOut) for name in tstc_files]
+
+            aero_position = [-abs(float(self.fst_vt['ElastoDyn']['OverHang'])), 0.0, float(self.fst_vt['ElastoDyn']['Twr2Shft'])]
+            aero = default_StC_vt()
+            aero.update({'StC_DOF_MODE': 4, 'StC_P_X': aero_position[0], 'StC_P_Y': aero_position[1], 'StC_P_Z': aero_position[2], 'PrescribedForcesCoord': 2, 'PrescribedForcesFile': f'"{local_load_files[0]}"'})
+            self.fst_vt['NStC'] = [aero]
+
+            self.fst_vt['TStC'] = []
+            for entry, load_file in zip(tower_loads, local_load_files[1:]):
+                position = entry.get('position', [])
+                if len(position) != 3:
+                    raise ValueError(f"Tower load entry has invalid StC position: {entry!r}")
+                tower = default_StC_vt()
+                tower.update({'StC_DOF_MODE': 4, 'StC_P_X': float(position[0]), 'StC_P_Y': float(position[1]), 'StC_P_Z': float(position[2]), 'PrescribedForcesCoord': 2, 'PrescribedForcesFile': f'"{load_file}"'})
+                self.fst_vt['TStC'].append(tower)
 
         # FAST version specific initialization
         reader = InputReader_OpenFAST()
@@ -338,6 +394,7 @@ class runFAST_pywrapper_batch(object):
         self.allow_fails        = False
         self.fail_value         = 9999
         self.write_stdout       = False
+        self.multiple_loading_files = ''
         
         self.post               = None
 
@@ -373,6 +430,7 @@ class runFAST_pywrapper_batch(object):
             case_data['allow_fails']        = self.allow_fails
             case_data['fail_value']         = self.fail_value
             case_data['write_stdout']       = self.write_stdout
+            case_data['multiple_loading_files'] = self.multiple_loading_files
             case_data['keep_time']          = self.keep_time
             case_data['goodman']            = self.goodman
             case_data['magnitude_channels'] = self.magnitude_channels
@@ -506,7 +564,8 @@ def evaluate(indict):
     known_keys = ['case', 'case_name', 'FAST_exe', 'FAST_lib', 'FAST_runDirectory',
                   'FAST_InputFile', 'FAST_directory', 'read_yaml', 'FAST_yamlfile_in', 'fst_vt',
                   'write_yaml', 'FAST_yamlfile_out', 'channels', 'overwrite_outfiles', 'keep_time',
-                  'goodman','magnitude_channels','fatigue_channels','post','use_exe','allow_fails','fail_value', 'write_stdout']
+                  'goodman','magnitude_channels','fatigue_channels','post','use_exe','allow_fails','fail_value', 'write_stdout',
+                  'multiple_loading_files']
     
     fast = runFAST_pywrapper()
     for k in indict:

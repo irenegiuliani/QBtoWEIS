@@ -10,6 +10,7 @@ from rosco.toolbox import turbine as ROSCO_turbine
 from rosco.toolbox.inputs.validation import load_rosco_yaml
 from rosco.toolbox.linear.robust_scheduling import rsched_driver
 from rosco.toolbox.utilities import list_check, DISCON_dict
+from openfast_io.FAST_reader import InputReader_OpenFAST
 import numpy as np
 from openmdao.api import ExplicitComponent, Group
 from wisdem.ccblade.ccblade import CCAirfoil, CCBlade
@@ -624,4 +625,24 @@ class ROSCO_Turbine(ExplicitComponent):
         outputs['pitch_vector'           ] = self.turbine.Cp.pitch_initial_rad
         outputs['tsr_vector'             ] = self.turbine.Cp.TSR_initial
         outputs['U_vector'               ] = np.array([5])
+
+
+class OpenFASTTurbine(ExplicitComponent):
+    def initialize(self):
+        self.options.declare('modeling_options')
+
+    def setup(self):
+        modeling_options = self.options['modeling_options']
+        fast = InputReader_OpenFAST()
+        fast.FAST_InputFile = modeling_options['OpenFAST']['openfast_file']
+        fast.FAST_directory = modeling_options['OpenFAST']['openfast_dir']
+        fast.path2dll = modeling_options['General']['openfast_configuration']['path2dll']
+        fast.execute()
+        radius = float(fast.fst_vt['ElastoDyn']['TipRad'])
+        discon = fast.fst_vt.get('DISCON_in', {})
+        if 'PC_RefSpd' not in discon or 'VS_TSRopt' not in discon or not discon['VS_TSRopt']:
+            raise Exception('use_existing_openfast_controller requires PC_RefSpd and VS_TSRopt in the imported DISCON file')
+        self.add_output('R', val=radius, units='m')
+        self.add_output('hub_height', val=float(fast.fst_vt['ElastoDyn']['TowerHt'] + fast.fst_vt['ElastoDyn']['Twr2Shft']), units='m')
+        self.add_output('v_rated', val=float(discon['PC_RefSpd']) * radius / float(discon['VS_TSRopt']), units='m/s')
 

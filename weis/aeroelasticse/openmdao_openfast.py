@@ -1636,7 +1636,10 @@ class FASTLoadCases(ExplicitComponent):
             fst_vt['HydroDyn']['MJointID2'] = fst_vt['HydroDyn']['MPropSetID2'] = N2
             fst_vt['HydroDyn']['MDivSize'] = 0.5*np.ones( fst_vt['HydroDyn']['NMembers'] )
             fst_vt['HydroDyn']['MCoefMod'] = np.ones( fst_vt['HydroDyn']['NMembers'], dtype=np.int_)
-            fst_vt['HydroDyn']['MHstLMod'] = np.ones( fst_vt['HydroDyn']['NMembers'], dtype=np.int_)
+            mhstlmod = modopt['OpenFAST']['HydroDyn']['MHstLMod']
+            if mhstlmod and len(mhstlmod) != fst_vt['HydroDyn']['NMembers']:
+                raise ValueError(f"OpenFAST.HydroDyn.MHstLMod must contain one value per HydroDyn member ({fst_vt['HydroDyn']['NMembers']}); received {len(mhstlmod)}.")
+            fst_vt['HydroDyn']['MHstLMod'] = np.asarray(mhstlmod, dtype=np.int_) if mhstlmod else np.ones(fst_vt['HydroDyn']['NMembers'], dtype=np.int_)
             fst_vt['HydroDyn']['JointAxID'] = np.ones( fst_vt['HydroDyn']['NJoints'], dtype=np.int_)
             fst_vt['HydroDyn']['JointOvrlp'] = np.zeros( fst_vt['HydroDyn']['NJoints'], dtype=np.int_)
             fst_vt['HydroDyn']['NCoefDpth'] = 0
@@ -1711,10 +1714,11 @@ class FASTLoadCases(ExplicitComponent):
         # Structural Control
         fst_vt['ServoDyn']['NumBStC']       = 0
         fst_vt['ServoDyn']['BStCfiles']     = ["unused"]
-        fst_vt['ServoDyn']['NumNStC']       = 0
-        fst_vt['ServoDyn']['NStCfiles']     = ["unused"]
-        fst_vt['ServoDyn']['NumTStC']       = 0 
-        fst_vt['ServoDyn']['TStCfiles']     = []
+        if not modopt['OpenFAST']['MULTIPLELOADINGFILES']:
+            fst_vt['ServoDyn']['NumNStC']       = 0
+            fst_vt['ServoDyn']['NStCfiles']     = ["unused"]
+            fst_vt['ServoDyn']['NumTStC']       = 0
+            fst_vt['ServoDyn']['TStCfiles']     = []
         fst_vt['ServoDyn']['NumSStC']       = 0
         fst_vt['ServoDyn']['SStCfiles']     = []
         
@@ -2047,7 +2051,9 @@ class FASTLoadCases(ExplicitComponent):
                 dlc_generator.cases[i_case].AnalysisTime = dlc_generator.cases[i_case].total_time
 
         # Generate wind files
-        if MPI and not self.options['opt_options']['driver']['design_of_experiments']['flag']:
+        if fst_vt['Fst']['CompInflow'] == 0:
+            WindFile_name = ['unused'] * dlc_generator.n_cases
+        elif MPI and not self.options['opt_options']['driver']['design_of_experiments']['flag']:
             # mpi comm management
             comm = MPI.COMM_WORLD
             rank = comm.Get_rank()
@@ -2163,6 +2169,7 @@ class FASTLoadCases(ExplicitComponent):
         fastBatch.allow_fails       = modopt['General']['openfast_configuration']['allow_fails']
         fastBatch.fail_value        = modopt['General']['openfast_configuration']['fail_value']
         fastBatch.write_stdout      = modopt['General']['openfast_configuration']['write_stdout']
+        fastBatch.multiple_loading_files = modopt['OpenFAST']['MULTIPLELOADINGFILES']
         if self.FAST_exe_user is not None:
             fastBatch.FAST_exe      = self.FAST_exe_user
         if self.FAST_lib_user is not None:

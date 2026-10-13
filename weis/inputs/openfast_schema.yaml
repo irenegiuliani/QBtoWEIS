@@ -2024,6 +2024,13 @@ properties:
                         enum: [0, 2]
                         default: 0
                         description: 'Method of computing distributed added-mass force. (0: Only and always on nodes below SWL at the undisplaced position. 2: Up to the instantaneous free surface) [overwrite to 0 when WaveMod = 0 or 6 or when WaveStMod = 0 in SeaState]'
+                    MHstLMod:
+                        type: array
+                        default: []
+                        description: Per-member hydrostatic load model switches. Leave empty to use 1 for every HydroDyn member.
+                        items:
+                            type: integer
+                            enum: [1, 2]
                     NMOutputs:
                         type: integer
                         minimum: 0
@@ -2287,6 +2294,28 @@ properties:
                 description: ServoDyn modelling options in OpenFAST
                 properties:
                     Echo: *echo
+                    NumNStC:
+                        type: integer
+                        default: 0
+                        minimum: 0
+                        description: Number of nacelle Structural Control files.
+                    NStCfiles:
+                        type: array
+                        default: [unused]
+                        items:
+                            type: string
+                        description: Nacelle Structural Control file names; {case_name} is replaced with the current OpenFAST case name.
+                    NumTStC:
+                        type: integer
+                        default: 0
+                        minimum: 0
+                        description: Number of tower Structural Control files.
+                    TStCfiles:
+                        type: array
+                        default: []
+                        items:
+                            type: string
+                        description: Tower Structural Control file names; {case_name} is replaced with the current OpenFAST case name.
                     DT:
                         type: string
                         default: 'default'
@@ -3112,6 +3141,14 @@ properties:
                 type: boolean
                 default: False
                 description: Whether we derive OpenFAST model from an existing model and ignore WISDEM
+            use_existing_openfast_controller:
+                type: boolean
+                default: False
+                description: With from_openfast, reuse the controller and DISCON file from the imported deck without running ROSCO tuning
+            MULTIPLELOADINGFILES:
+                type: string
+                default: ''
+                description: Folder containing manifest.json and the per-case prescribed-load time-series files.
             regulation_trajectory: 
                 type: string
                 default: unused
