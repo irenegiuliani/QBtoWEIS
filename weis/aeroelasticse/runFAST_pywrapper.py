@@ -207,6 +207,48 @@ class runFAST_pywrapper(object):
             servodyn['NStCfiles'] = [name.format(case_name=self.FAST_namingOut) for name in nstc_files]
             servodyn['TStCfiles'] = [name.format(case_name=self.FAST_namingOut) for name in tstc_files]
 
+            wave_file = case_loads.get('wave_elevation')
+            if wave_file:
+                source = os.path.join(self.multiple_loading_files, wave_file)
+                if not os.path.isfile(source):
+                    raise FileNotFoundError(
+                        f"Missing QBlade wave-elevation file for OpenFAST case {self.FAST_namingOut!r}: {source}"
+                    )
+                destination = os.path.join(self.FAST_runDirectory, os.path.basename(source))
+                if os.path.abspath(source) != os.path.abspath(destination):
+                    shutil.copy2(source, destination)
+                if os.path.splitext(destination)[1].lower() != '.elev':
+                    raise ValueError(f'OpenFAST WaveMod=5 input must have an .Elev extension: {source}')
+                wave_dt = float(case_loads['wave_dt'])
+                wave_tmax = float(case_loads['wave_tmax'])
+                if wave_dt <= 0.0 or wave_tmax <= 0.0:
+                    raise ValueError(f'Invalid QBlade wave timing for case {self.FAST_namingOut!r}')
+                seastate = self.fst_vt['SeaState']
+                seastate['WaveMod'] = 5
+                seastate['WaveDT'] = wave_dt
+                seastate['WaveTMax'] = wave_tmax
+                seastate['WvKinFile'] = os.path.splitext(os.path.basename(destination))[0]
+                seastate['WaveStMod'] = int(case_loads['wave_stretching'])
+                # Preserve all frequencies in the supplied elevation series and
+                # do not add second-order energy that was not in that series.
+                seastate['WvLowCOff'] = 0.0
+                seastate['WvHiCOff'] = np.pi / wave_dt
+                seastate['WvDiffQTF'] = False
+                seastate['WvSumQTF'] = False
+                # Case-specific DLC values are applied later and normally set
+                # WaveMod back to the internally generated spectrum.  Override
+                # those values too so the external QBlade realization wins.
+                if self.case is not None:
+                    self.case[('SeaState', 'WaveMod')] = seastate['WaveMod']
+                    self.case[('SeaState', 'WaveDT')] = seastate['WaveDT']
+                    self.case[('SeaState', 'WaveTMax')] = seastate['WaveTMax']
+                    self.case[('SeaState', 'WvKinFile')] = seastate['WvKinFile']
+                    self.case[('SeaState', 'WaveStMod')] = seastate['WaveStMod']
+                    self.case[('SeaState', 'WvLowCOff')] = seastate['WvLowCOff']
+                    self.case[('SeaState', 'WvHiCOff')] = seastate['WvHiCOff']
+                    self.case[('SeaState', 'WvDiffQTF')] = seastate['WvDiffQTF']
+                    self.case[('SeaState', 'WvSumQTF')] = seastate['WvSumQTF']
+
             aero_position = [-abs(float(self.fst_vt['ElastoDyn']['OverHang'])), 0.0, float(self.fst_vt['ElastoDyn']['Twr2Shft'])]
             aero = default_StC_vt()
             aero.update({'StC_DOF_MODE': 4, 'StC_P_X': aero_position[0], 'StC_P_Y': aero_position[1], 'StC_P_Z': aero_position[2], 'PrescribedForcesCoord': 2, 'PrescribedForcesFile': f'"{local_load_files[0]}"'})
