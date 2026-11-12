@@ -44,10 +44,6 @@ class TestIECWind(unittest.TestCase):
         n_ws_aep = len(np.unique(dlc_aep_ws))
 
         np.testing.assert_equal(n_ws_aep, 6)
-        np.testing.assert_allclose(
-            dlc_generator.qblade_case_inputs[-1][('QSim', 'HORANGLE')]['vals'],
-            np.zeros(dlc_generator.n_cases),
-        )
 
     def test_custom_dlc_probabilities_follow_seed_expansion(self):
 
@@ -69,9 +65,9 @@ class TestIECWind(unittest.TestCase):
             'wave_height': [1.1, 2.2],
             'wave_period': [6.8, 8.8],
             'wave_heading': [0.0, 30.0],
-            'HORANGLE': [5.0, 10.0],
+            'wind_heading': [5.0, 10.0],
             'probabilities': [0.2, 0.8],
-            'yaw_misalign': [0.0],
+            'yaw_misalign': [0.0, 2.0],
         })
 
         dlc_generator = DLCGenerator(
@@ -97,6 +93,10 @@ class TestIECWind(unittest.TestCase):
         np.testing.assert_allclose(
             dlc_generator.qblade_case_inputs[-1][('QSim', 'HORANGLE')]['vals'],
             [5.0, 5.0, 10.0, 10.0],
+        )
+        np.testing.assert_allclose(
+            dlc_generator.qblade_case_inputs[-1][('QSim', 'INITIAL_YAW')]['vals'],
+            [0.0, 0.0, 2.0, 2.0],
         )
 
     def test_generator(self):

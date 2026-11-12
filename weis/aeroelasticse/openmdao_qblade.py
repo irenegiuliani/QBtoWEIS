@@ -2512,6 +2512,7 @@ class QBLADELoadCases(ExplicitComponent):
             i_qb_vt['QSim']['MEANINF']          = 0
             i_qb_vt['QSim']['WNDTYPE']          = case_list[idx][('QSim', 'WNDTYPE')]
             i_qb_vt['QTurbSim']['TurbSimInp']   = case_list[idx][('QTurbSim', 'TurbSimInp')]
+            i_qb_vt['QSim']['HORANGLE']         = case_list[idx][('QSim', 'HORANGLE')]
             i_qb_vt['QSim']['TMax']             = case_list[idx][('QSim', 'TMax')]
             i_qb_vt['QSim']['NUMTIMESTEPS']     = int(i_qb_vt['QSim']['TMax'] / i_qb_vt['QSim']['TIMESTEP'])
             i_qb_vt['QSim']['STOREFROM']        = case_list[idx][('QSim', 'STOREFROM')]
