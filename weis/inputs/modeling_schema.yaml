@@ -557,6 +557,16 @@ properties:
                                 minimum: 0.0
                                 maximum: 200.0
                                 uniqueItems: true
+                        HORANGLE:
+                            type: array
+                            description: Horizontal inflow angle for each wind speed in this DLC. If omitted, zero degrees is used for every wind speed.
+                            default: []
+                            items:
+                                type: number
+                                unit: deg
+                                minItems: 1
+                                minimum: -180.0
+                                maximum: 180.0
                         ws_bin_size:
                             type: number
                             default: 2

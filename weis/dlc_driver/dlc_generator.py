@@ -108,7 +108,8 @@ qblade_input_map = {
     'WindFile_type': ("QSim","WNDTYPE"),
     'wind_speed': ("QSim","MEANINF"), # double check this 
     'WindFile_name': ("QTurbSim","TurbSimInp"),
-    'WindHd': ("QSim","VERTANGLE"), # double check this
+    'WindHd': ("QSim","HORANGLE"),
+    'HORANGLE': ("QSim","HORANGLE"),
 
     # TODO: Check if required in QBalde
     # 'WindFile_name': ("InflowWind","Filename_Uni"),
@@ -346,6 +347,11 @@ class DLCGenerator(object):
             wind_heading = np.array([])
         return wind_heading
 
+    def get_horangle(self, options):
+        if len(options.get('HORANGLE', [])) > 0:
+            return np.array([float(angle) for angle in options['HORANGLE']])
+        return np.array([0.])
+
     def get_wave_height(self, options):
         if len(options['wave_height']) > 0:
             wave_height = np.array( [float(m) for m in options['wave_height']] )
@@ -386,12 +392,16 @@ class DLCGenerator(object):
         wind_speed, wind_seed = self.get_wind_seeds(options, wind_speeds_indiv)
         wave_seed = self.get_wave_seeds(options, wind_speed)
         wind_heading = self.get_wind_heading(options)
+        horangle = self.get_horangle(options)
         wave_height = self.get_wave_height(options)
         wave_period = self.get_wave_period(options)
         wave_gamma = self.get_wave_gamma(options)
         wave_heading = self.get_wave_heading(options)
         probabilities = self.get_probabilities(options)
         is_custom = options.get('label') == 'Custom' or options.get('DLC') == 'Custom'
+
+        if len(horangle) == len(wind_speeds_indiv) and len(horangle) != len(wind_speed):
+            horangle = np.repeat(horangle, len(wind_speed) // len(wind_speeds_indiv))
 
         if is_custom:
             n_rows = len(wind_speeds_indiv)
@@ -422,6 +432,8 @@ class DLCGenerator(object):
             raise Exception("The vector of wind_seed must have either length=1 or the same length of wind speeds")
         if len(wind_heading) > 1 and len(wind_heading) != len(wind_speed):
             raise Exception("The vector of wind_heading must have either length=1 or the same length of wind speeds")
+        if len(horangle) > 1 and len(horangle) != len(wind_speed):
+            raise Exception("The vector of HORANGLE must have either length=1 or the same length of wind speeds")
         if len(wave_seed) > 1 and len(wave_seed) != len(wind_speed):
             raise Exception("The vector of wave seeds must have the same length of wind speeds or not defined")
         if len(wave_height) > 1 and len(wave_height) != len(wind_speed):
@@ -446,6 +458,7 @@ class DLCGenerator(object):
         metocean_case_info['wind_seed'] = wind_seed
         metocean_case_info['wave_seed'] = wave_seed
         metocean_case_info['wind_heading'] = wind_heading
+        metocean_case_info['HORANGLE'] = horangle
         metocean_case_info['wave_height'] = wave_height
         metocean_case_info['wave_period'] = wave_period
         # metocean_case_info['current_speeds'] = current_speeds
@@ -502,6 +515,9 @@ class DLCGenerator(object):
         # Generate case list, both generic and OpenFAST specific
         self.set_time_options(dlc_options)
         met_options = self.gen_met_options(dlc_options, sea_state=dlc_options['sea_state'])
+
+        wind_group = next(group for group in generic_case_inputs if 'wind_speed' in group)
+        wind_group.append('HORANGLE')
         
         # Add met options to dlc_options for output reporting
         dlc_options.update(met_options)
@@ -706,7 +722,7 @@ class DLCGenerator(object):
         case_inputs_openfast = {}
         for i_group, generic_case_group in enumerate(generic_case_inputs):
             for generic_input in generic_case_group:
-                if generic_input == 'probability':
+                if generic_input in ('probability', 'HORANGLE'):
                     continue
                 
                 if generic_input not in self.openfast_input_map.keys():
