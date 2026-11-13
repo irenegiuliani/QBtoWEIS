@@ -19,6 +19,7 @@ from weis.control.tune_rosco import ServoSE_ROSCO, ROSCO_Turbine, OpenFASTTurbin
 #from wisdem.rotorse.rotor_elasticity import RotorElasticity
 from weis.aeroelasticse.utils import RotorLoadsDeflStrainsWEIS
 from weis.glue_code.gc_RunTools import Convergence_Trends_Opt, Outputs_2_Screen
+from weis.glue_code.floater_mooring_capex import FloaterMooringCAPEX
 from weis.frequency.raft_wrapper import RAFT_WEIS
 from weis.control.tmd import TMD_group
 from rosco.toolbox.inputs.validation import load_rosco_yaml
@@ -130,6 +131,12 @@ class WindPark(om.Group):
 
         # Analysis components
         self.add_subsystem('wisdem',   wisdemPark(modeling_options = modeling_options, opt_options = opt_options), promotes=['*'])
+
+        # FloatingSE provides both inputs only for a floating, moored system.
+        if modeling_options['flags']['floating'] and modeling_options['flags']['mooring']:
+            self.add_subsystem('floater_mooring_capex', FloaterMooringCAPEX())
+            self.connect('floatingse.platform_hull_mass', 'floater_mooring_capex.platform_hull_mass')
+            self.connect('floatingse.mooring_mass', 'floater_mooring_capex.mooring_mass')
 
         if opt_options['constraints']['floating'].get('mooring_length_min', {}).get('flag', False):
             if not modeling_options['flags']['mooring']:

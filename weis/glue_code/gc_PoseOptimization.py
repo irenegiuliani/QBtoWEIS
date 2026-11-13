@@ -75,6 +75,13 @@ class PoseOptimizationWEIS(PoseOptimization):
         
         elif self.opt['merit_figure'] == 'OL2CL_pitch':
             wt_opt.model.add_objective('aeroelastic.OL2CL_pitch')
+
+        elif self.opt['merit_figure'] == 'capex_floater_moorings':
+            if not (self.modeling['flags']['floating'] and self.modeling['flags']['mooring']):
+                raise ValueError(
+                    "capex_floater_moorings requires both a floating platform and moorings."
+                )
+            wt_opt.model.add_objective('floater_mooring_capex.capex_floater_moorings', ref=1.0e7)
         
         else:
             super(PoseOptimizationWEIS, self).set_objective(wt_opt)
