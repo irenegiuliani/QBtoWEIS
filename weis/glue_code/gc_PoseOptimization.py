@@ -254,6 +254,17 @@ class PoseOptimizationWEIS(PoseOptimization):
         if self.opt['constraints']['floating'].get('mooring_length_min', {}).get('flag', False):
             wt_opt.model.add_constraint('mooring_length_check.margin', lower=0.0)
 
+        if self.opt['constraints']['floating'].get('mooring_length_min_equilibrium', {}).get('flag', False):
+            if not self.modeling['QBlade']['flag']:
+                raise Exception('The equilibrium mooring-length constraint requires QBlade.')
+            if self.modeling['QBlade']['from_qblade']:
+                raise Exception('The equilibrium mooring-length constraint requires from_qblade=False.')
+            if not self.modeling['flags']['mooring']:
+                raise Exception('The equilibrium mooring-length constraint requires the mooring model.')
+            wt_opt.model.add_constraint(
+                'aeroelastic_qblade.constr_mooring_length_min_equilibrium', lower=1.0
+            )
+
         blade_opt = self.opt["design_variables"]["blade"]
         blade_constr = self.opt["constraints"]["blade"]
         if blade_constr['tip_deflection']['flag']:

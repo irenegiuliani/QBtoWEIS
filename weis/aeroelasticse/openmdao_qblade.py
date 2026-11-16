@@ -507,6 +507,12 @@ class QBLADELoadCases(ExplicitComponent):
         if modopt["flags"]["mooring"]:
             self.add_output("Max_MoorLineTension", val=np.zeros(self.n_mooring_lines), units="N", desc="Maximum tension in each mooring line")
             self.add_output("moor_axial_load_ratio", val=np.zeros(self.n_mooring_lines), desc="ULS axial load utilization of each mooring line")
+            self.add_output(
+                "constr_mooring_length_min_equilibrium",
+                val=np.zeros(self.n_mooring_lines),
+                desc=("Ratio of unstretched mooring-line length to its straight-line "
+                      "anchor-to-fairlead distance at the maximum simulated positive surge."),
+            )
             if self.mooring_fatigue_active:
                 fatigue_shape = (self.n_mooring_lines, len(self.mooring_fatigue_stations))
                 self.add_output("mooring_fatigue_load_sum", val=np.zeros(fatigue_shape), desc="Annual probability-weighted sum of rainflow tension ranges raised to tn_m; frozen load-side fatigue quantity.")
@@ -3557,6 +3563,32 @@ class QBLADELoadCases(ExplicitComponent):
         for timeseries in chan_time:
             max_offset_ts = np.sqrt(timeseries['NP Trans. X_g']**2 + timeseries['NP Trans. Y_g']**2).max()
             outputs['Max_Offset'] = max(outputs['Max_Offset'], max_offset_ts)  #modfied
+
+        # Minimum feasible line length at the largest positive simulated surge.
+        # Each vessel endpoint translates with the platform while fixed anchor
+        # endpoints remain in place.  This is evaluated line-by-line because a
+        # surge in +X increases the distance to each of three radial anchors by
+        # a different amount.
+        if (self.options['modeling_options']['flags']['mooring']
+                and not self.options['modeling_options']['QBlade']['from_qblade']):
+            surge_max = max(
+                float(np.max(np.asarray(timeseries['NP Trans. X_g'], dtype=float)))
+                for timeseries in chan_time
+            )
+            mooropt = self.options['modeling_options']['mooring']
+            node_indices = {name: i for i, name in enumerate(mooropt['node_names'])}
+            node_positions = np.asarray(inputs['nodes_location_full'], dtype=float).copy()
+            vessel_nodes = np.asarray(mooropt['node_type']) == 'vessel'
+            node_positions[vessel_nodes, 0] += surge_max
+
+            endpoint_1 = np.asarray([node_indices[name] for name in mooropt['node1']], dtype=int)
+            endpoint_2 = np.asarray([node_indices[name] for name in mooropt['node2']], dtype=int)
+            L_min = np.linalg.norm(node_positions[endpoint_2] - node_positions[endpoint_1], axis=1)
+            if np.any(L_min <= 0.0):
+                raise ValueError('Mooring-line endpoint distance must be positive at maximum surge.')
+            outputs['constr_mooring_length_min_equilibrium'] = (
+                np.asarray(inputs['unstretched_length'], dtype=float) / L_min
+            )
             
         return outputs
 
