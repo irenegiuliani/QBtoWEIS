@@ -121,12 +121,20 @@ class QBLADELoadCases(ExplicitComponent):
         self._qblade_case_name_to_id = {}
         self._qblade_result_names = ()
         self._fatigue_case_ids = ()
+        self._mooring_fatigue_case_ids = ()
+        self._mooring_fatigue_uses_custom_cases = False
         self._uls_case_ids = ()
 
-        if self.fatigue_requested:
-            configured_dlc_labels = [str(dlc.get("DLC")) for dlc in modopt.get("DLC_driver", {}).get("DLCs", [])]
+        configured_dlc_labels = [str(dlc.get("DLC")) for dlc in modopt.get("DLC_driver", {}).get("DLCs", [])]
+        if self.tower_fatigue_active:
             if (not modopt["QBlade"]["simulation"].get("DLCGenerator", False) or "Custom" not in configured_dlc_labels):
-                raise ValueError(f"Tower or mooring fatigue requires DLCGenerator=True and at least one Custom DLC. Configured DLCs: {configured_dlc_labels}")
+                raise ValueError(f"Tower fatigue requires DLCGenerator=True and at least one Custom DLC. Configured DLCs: {configured_dlc_labels}")
+        if self.mooring_fatigue_active:
+            if not modopt["QBlade"]["simulation"].get("DLCGenerator", False):
+                raise ValueError("Mooring fatigue requires DLCGenerator=True.")
+            if not configured_dlc_labels:
+                raise ValueError("Mooring fatigue requires at least one configured DLC (Custom or an IEC DLC such as 1.1 or 1.6).")
+        if self.fatigue_requested:
             if modopt["QBlade"]["Turbine"].get("NOSTRUCTURE", False):
                 raise ValueError("Tower or mooring fatigue requires QBlade structural outputs; NOSTRUCTURE must be False.")
 
@@ -618,27 +626,38 @@ class QBLADELoadCases(ExplicitComponent):
             self.qb_inumber += 1
 
     def _select_dlc_cases(self, dlc_generator):
-        """Select fatigue and ULS cases from the configured DLC population.
+        """Select tower-fatigue, mooring-fatigue, and ULS case populations.
 
-        Custom cases are the lifetime fatigue population. If any non-Custom
-        DLCs are configured, they are the ULS population; otherwise Custom
-        cases are also used for ULS. Selection is based on configured cases,
-        never on which simulations happened to succeed.
+        Tower fatigue is Custom-only. Mooring fatigue uses Custom cases when
+        present, otherwise all generated IEC cases with Weibull weights.
+        If any non-Custom DLCs are configured, they are the ULS population;
+        otherwise Custom cases are also used for ULS. Selection is based on
+        configured cases, never on which simulations happened to succeed.
         """
         if dlc_generator is None:
-            if self.fatigue_requested:
-                raise ValueError("Tower or mooring fatigue requires Custom DLC cases.")
+            if self.tower_fatigue_active:
+                raise ValueError("Tower fatigue requires Custom DLC cases.")
+            if self.mooring_fatigue_active:
+                raise ValueError("Mooring fatigue requires DLCGenerator cases.")
 
             self._fatigue_case_ids = ()
+            self._mooring_fatigue_case_ids = ()
+            self._mooring_fatigue_uses_custom_cases = False
             self._uls_case_ids = ()
             return
 
         labels = tuple(str(case.label) for case in dlc_generator.cases)
         self._fatigue_case_ids = tuple(i for i, label in enumerate(labels) if label == "Custom")
+        self._mooring_fatigue_case_ids = (
+            self._fatigue_case_ids if self._fatigue_case_ids else tuple(range(len(labels)))
+        )
+        self._mooring_fatigue_uses_custom_cases = bool(self._fatigue_case_ids)
         self._uls_case_ids = select_uls_case_ids(labels)
 
-        if self.fatigue_requested and not self._fatigue_case_ids:
-            raise ValueError("Tower or mooring fatigue requires at least one Custom DLC.")
+        if self.tower_fatigue_active and not self._fatigue_case_ids:
+            raise ValueError("Tower fatigue requires at least one Custom DLC.")
+        if self.mooring_fatigue_active and not self._mooring_fatigue_case_ids:
+            raise ValueError("Mooring fatigue requires at least one generated DLC case (Custom or an IEC DLC such as 1.1 or 1.6).")
 
         # Custom probabilities are also consumed by the generic DEL/damage
         # and, when applicable, AEP post-processing. Validate every Custom
@@ -648,6 +667,49 @@ class QBLADELoadCases(ExplicitComponent):
 
             if not np.isfinite(probability) or probability < 0.0:
                 raise ValueError(f"Custom DLC case {case_id} probability must be finite and non-negative; got {probability!r}.")
+
+    @staticmethod
+    def _mooring_fatigue_probabilities(dlc_generator, case_ids, use_custom_probabilities, turbine_class):
+        """Return fatigue weights without modifying the generated DLC cases.
+
+        Custom DLCs provide their own joint-state probabilities.  When no
+        Custom cases exist, each IEC case is weighted with the Weibull PDF at
+        its URef.  Repeated stochastic seeds for the same wind/wave heading
+        share that weight equally.  The weights intentionally are not
+        normalized: simulations over a partial wind-speed range represent
+        only that portion of the lifetime wind distribution.
+        """
+        case_ids = tuple(case_ids)
+        if not case_ids:
+            raise ValueError("Mooring fatigue requires at least one DLC case.")
+
+        if use_custom_probabilities:
+            probabilities = np.asarray(
+                [dlc_generator.cases[case_id].probability for case_id in case_ids], dtype=float
+            )
+            if np.any(~np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+                raise ValueError("Custom mooring-fatigue probabilities must be finite and non-negative.")
+            return probabilities
+
+        groups = {}
+        for case_id in case_ids:
+            case = dlc_generator.cases[case_id]
+            wind_speed = float(case.URef)
+            wave_heading = float(case.wave_heading)
+            if not np.isfinite(wind_speed) or wind_speed < 0.0 or not np.isfinite(wave_heading):
+                raise ValueError(f"Invalid URef or wave_heading for mooring-fatigue DLC case {case_id}.")
+            groups.setdefault((wind_speed, wave_heading), []).append(case_id)
+
+        pp = PowerProduction(turbine_class)
+        probability_by_case = {}
+        for (wind_speed, _), grouped_case_ids in groups.items():
+            wind_probability = float(pp.prob_WindDist(wind_speed, disttype="pdf"))
+            if not np.isfinite(wind_probability) or wind_probability < 0.0:
+                raise RuntimeError(f"Invalid Weibull probability for mooring-fatigue wind speed {wind_speed}.")
+            per_seed_probability = wind_probability / len(grouped_case_ids)
+            probability_by_case.update({case_id: per_seed_probability for case_id in grouped_case_ids})
+
+        return np.asarray([probability_by_case[case_id] for case_id in case_ids], dtype=float)
 
               
     def _register_qblade_cases(self, case_names):
@@ -2629,7 +2691,10 @@ class QBLADELoadCases(ExplicitComponent):
                     outputs = self.get_mooring_loading(mooring_uls_summary_stats, inputs, outputs, modopt)
 
                     if self.mooring_fatigue_active:
-                        outputs = self.get_mooring_fatigue_load_sum(summary_stats, chan_time, outputs, dlc_generator, failed_sim_ids)
+                        outputs = self.get_mooring_fatigue_load_sum(
+                            summary_stats, chan_time, outputs, dlc_generator,
+                            failed_sim_ids, discrete_inputs['turbine_class'],
+                        )
 
                     outputs = self._update_mooring_constraints(inputs, outputs)
 
@@ -3156,16 +3221,33 @@ class QBLADELoadCases(ExplicitComponent):
         return outputs
 
 
-    def get_mooring_fatigue_load_sum(self, sum_stats, chan_time, outputs, dlc_generator, failed_sim_ids):
+    def get_mooring_fatigue_load_sum(self, sum_stats, chan_time, outputs, dlc_generator, failed_sim_ids, turbine_class):
         if dlc_generator is None:
             raise ValueError("Mooring fatigue requires DLCGenerator fatigue cases.")
 
         m = float(self.mooring_fatigue_options.get("tn_m", 3.0))
         self._select_dlc_cases(dlc_generator)
-        fatigue_case_ids = [case_id for case_id in self._fatigue_case_ids if float(dlc_generator.cases[case_id].probability) > 0.0]
+        fatigue_case_ids = list(self._mooring_fatigue_case_ids)
+        fatigue_weights = self._mooring_fatigue_probabilities(
+            dlc_generator,
+            fatigue_case_ids,
+            self._mooring_fatigue_uses_custom_cases,
+            turbine_class,
+        )
+        positive_probability = fatigue_weights > 0.0
+        fatigue_case_ids = [case_id for case_id, include in zip(fatigue_case_ids, positive_probability) if include]
+        fatigue_weights = fatigue_weights[positive_probability]
 
         if not fatigue_case_ids:
-            raise ValueError("Mooring fatigue requires at least one Custom DLC with positive probability.")
+            raise ValueError("Mooring fatigue requires at least one DLC case with positive Custom or Weibull probability.")
+
+        if self._mooring_fatigue_uses_custom_cases:
+            logger.info("Mooring fatigue is using Custom DLC probabilities.")
+        else:
+            logger.warning(
+                "No Custom DLCs are configured. Mooring fatigue is using Weibull wind-speed "
+                "probabilities for all configured DLC cases without normalization."
+            )
 
         failed_set = {int(case_id) for case_id in (failed_sim_ids or [])}
         failed_fatigue_cases = [case_id for case_id in fatigue_case_ids if case_id in failed_set]
@@ -3178,7 +3260,7 @@ class QBLADELoadCases(ExplicitComponent):
         probabilities = []
         times = []
 
-        for case_id in fatigue_case_ids:
+        for case_id, probability in zip(fatigue_case_ids, fatigue_weights):
             if case_id not in case_to_row:
                 raise RuntimeError(f"Fatigue case {case_id} has no QBlade result.")
 
@@ -3193,7 +3275,7 @@ class QBLADELoadCases(ExplicitComponent):
                     # QBlade_wrapper already converts force channels N -> kN.
                     case_tensions[i_line, i_station] = np.asarray(time_series[channel], dtype=float)
             histories.append(case_tensions)
-            probabilities.append(float(dlc_generator.cases[case_id].probability))
+            probabilities.append(float(probability))
             times.append(time)
 
         outputs["mooring_fatigue_load_sum"] = fatigue_load_sum(histories, probabilities, times, m)
