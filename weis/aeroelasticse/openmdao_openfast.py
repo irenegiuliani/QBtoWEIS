@@ -2169,8 +2169,11 @@ class FASTLoadCases(ExplicitComponent):
         fastBatch.allow_fails       = modopt['General']['openfast_configuration']['allow_fails']
         fastBatch.fail_value        = modopt['General']['openfast_configuration']['fail_value']
         fastBatch.write_stdout      = modopt['General']['openfast_configuration']['write_stdout']
-        fastBatch.startup_wave_size = modopt['General']['openfast_configuration']['startup_wave_size']
-        fastBatch.startup_wave_interval_seconds = modopt['General']['openfast_configuration']['startup_wave_interval_seconds']
+        fastBatch.nFD               = modopt['General']['openfast_configuration']['nFD']
+        fastBatch.NBURST            = modopt['General']['openfast_configuration']['NBURST']
+        fastBatch.STAGGER           = modopt['General']['openfast_configuration']['STAGGER']
+        fastBatch.MAXW              = modopt['General']['openfast_configuration']['MAXW']
+        fastBatch.MINAVAIL_GB       = modopt['General']['openfast_configuration']['MINAVAIL_GB']
         fastBatch.multiple_loading_files = modopt['OpenFAST']['MULTIPLELOADINGFILES']
         if self.FAST_exe_user is not None:
             fastBatch.FAST_exe      = self.FAST_exe_user

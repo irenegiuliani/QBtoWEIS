@@ -23,6 +23,10 @@ from weis.aeroelasticse.openfast_library import FastLibAPI
 
 import numpy as np
 
+_MPI_LAUNCH_REQUEST_TAG = 20
+_MPI_LAUNCH_PERMISSION_TAG = 21
+_MPI_LAUNCH_COMPLETE_TAG = 22
+
 # Realpath will resolve symlinks when OpenFAST is available on PATH.
 _openfast_on_path = shutil.which('openfast')
 of_path = os.path.realpath(_openfast_on_path) if _openfast_on_path else 'openfast'
@@ -147,8 +151,11 @@ class runFAST_pywrapper(object):
         self.fail_value         = 9999
         self.write_stdout       = False
         self.multiple_loading_files = ''
-        self.startup_wave_size = 0
-        self.startup_wave_interval_seconds = 0.0
+        self.NBURST             = 0
+        self.STAGGER            = 0.0
+        self.MAXW               = 0
+        self.MINAVAIL_GB        = 0.0
+        self._mpi_launch_parent_rank = None
         
         self.overwrite_outfiles = True   # True: existing output files will be overwritten, False: if output file with the same name already exists, OpenFAST WILL NOT RUN; This is primarily included for code debugging with OpenFAST in the loop or for specific Optimization Workflows where OpenFAST is to be run periodically instead of for every objective function anaylsis
 
@@ -170,19 +177,62 @@ class runFAST_pywrapper(object):
                 #extreme_channels=channel_extremes_default,
             )
 
-    def _startup_wave_sleep(self):
-        if self.startup_wave_size <= 0 or self.startup_wave_interval_seconds <= 0.0:
+    @staticmethod
+    def _available_memory_gb():
+        try:
+            with open('/proc/meminfo', encoding='utf-8') as meminfo:
+                for line in meminfo:
+                    if line.startswith('MemAvailable:'):
+                        return float(line.split()[1]) / (1024.0 ** 2)
+        except OSError:
+            pass
+        return None
+
+    def _wait_for_mpi_launch_permission(self):
+        if self._mpi_launch_parent_rank is None:
             return
 
+        from openmdao.utils.mpi import MPI
+
+        comm = MPI.COMM_WORLD
         local_rank = int(os.environ.get("SLURM_LOCALID", "0"))
-        wave_index = local_rank // self.startup_wave_size
-        delay = wave_index * self.startup_wave_interval_seconds
-        if delay > 0.0:
-            print(
-                f"OpenFAST startup wave: case={self.FAST_namingOut}, "
-                f"SLURM_LOCALID={local_rank}, wave_index={wave_index}, delay={delay}s"
-            )
-            time.sleep(delay)
+        node = os.environ.get('SLURM_NODEID', platform.node() or 'local')
+        request = {
+            'case_name': self.FAST_namingOut,
+            'node': node,
+            'local_rank': local_rank,
+            'available_gb': self._available_memory_gb(),
+        }
+        last_report = 0.0
+
+        while True:
+            now = time.monotonic()
+            if now - last_report >= 5.0:
+                request['available_gb'] = self._available_memory_gb()
+                comm.send(request, dest=self._mpi_launch_parent_rank, tag=_MPI_LAUNCH_REQUEST_TAG)
+                last_report = now
+
+            if comm.Iprobe(source=self._mpi_launch_parent_rank, tag=_MPI_LAUNCH_PERMISSION_TAG):
+                permission = comm.recv(source=self._mpi_launch_parent_rank, tag=_MPI_LAUNCH_PERMISSION_TAG)
+                if permission['case_name'] == self.FAST_namingOut:
+                    print(
+                        f"OpenFAST launch: case={self.FAST_namingOut}, SLURM_LOCALID={local_rank}, "
+                        f"node={node}, mode={permission['mode']}"
+                    )
+                    return
+            time.sleep(0.1)
+
+    def _notify_mpi_launch_complete(self):
+        if self._mpi_launch_parent_rank is None:
+            return
+
+        from openmdao.utils.mpi import MPI
+
+        MPI.COMM_WORLD.send(
+            {'case_name': self.FAST_namingOut},
+            dest=self._mpi_launch_parent_rank,
+            tag=_MPI_LAUNCH_COMPLETE_TAG,
+        )
         
     def execute(self):
 
@@ -319,8 +369,11 @@ class runFAST_pywrapper(object):
             os.chdir(FAST_directory)
         
             openfastlib = FastLibAPI(self.FAST_lib, os.path.abspath(os.path.basename(writer.FAST_InputFileOut)))
-            self._startup_wave_sleep()
-            openfastlib.fast_run()
+            self._wait_for_mpi_launch_permission()
+            try:
+                openfastlib.fast_run()
+            finally:
+                self._notify_mpi_launch_complete()
 
             output_dict = {}
             for i, channel in enumerate(openfastlib.output_channel_names):
@@ -357,8 +410,11 @@ class runFAST_pywrapper(object):
 
             #check if OpenFAST is set not to overwrite existing output files, TODO: move this further up in the workflow for minor computation savings
             if self.overwrite_outfiles or (not self.overwrite_outfiles and not (os.path.exists(FAST_Output) or os.path.exists(FAST_Output_txt))):
-                self._startup_wave_sleep()
-                failed = wrapper.execute()
+                self._wait_for_mpi_launch_permission()
+                try:
+                    failed = wrapper.execute()
+                finally:
+                    self._notify_mpi_launch_complete()
                 if failed:
                     print('OpenFAST Failed! Please check the run logs.')
                     if self.allow_fails:
@@ -456,8 +512,11 @@ class runFAST_pywrapper_batch(object):
         self.fail_value         = 9999
         self.write_stdout       = False
         self.multiple_loading_files = ''
-        self.startup_wave_size = 0
-        self.startup_wave_interval_seconds = 0.0
+        self.nFD                = 1
+        self.NBURST             = 0
+        self.STAGGER            = 0.0
+        self.MAXW               = 0
+        self.MINAVAIL_GB        = 0.0
         
         self.post               = None
 
@@ -493,8 +552,10 @@ class runFAST_pywrapper_batch(object):
             case_data['allow_fails']        = self.allow_fails
             case_data['fail_value']         = self.fail_value
             case_data['write_stdout']       = self.write_stdout
-            case_data['startup_wave_size'] = self.startup_wave_size
-            case_data['startup_wave_interval_seconds'] = self.startup_wave_interval_seconds
+            case_data['NBURST']             = self.NBURST
+            case_data['STAGGER']            = self.STAGGER
+            case_data['MAXW']               = self.MAXW
+            case_data['MINAVAIL_GB']        = self.MINAVAIL_GB
             case_data['multiple_loading_files'] = self.multiple_loading_files
             case_data['keep_time']          = self.keep_time
             case_data['goodman']            = self.goodman
@@ -588,21 +649,112 @@ class runFAST_pywrapper_batch(object):
 
         case_data_all = self.create_case_data()
 
+        launch_control_requested = any(
+            value > 0 for value in (self.NBURST, self.STAGGER, self.MAXW, self.MINAVAIL_GB)
+        )
+        launch_control = self.nFD == 1 and launch_control_requested
+        if launch_control_requested and self.nFD != 1:
+            print(f"OpenFAST launch control disabled because nFD={self.nFD}; existing MPI scheduling is unchanged.")
+        node_state = {}
+        active_ranks = {}
+        warned_memory_nodes = set()
+
         output = []
         for i in range(N_loops):
             idx_s    = i*size
             idx_e    = min((i+1)*size, N_cases)
 
             for j, case_data in enumerate(case_data_all[idx_s:idx_e]):
+                if launch_control:
+                    case_data['_mpi_launch_parent_rank'] = rank
                 data   = [evaluate_multi, case_data]
                 rank_j = sub_ranks[j]
                 comm.send(data, dest=rank_j, tag=0)
 
-            # for rank_j in sub_ranks:
-            for j, case_data in enumerate(case_data_all[idx_s:idx_e]):
-                rank_j = sub_ranks[j]
-                data_out = comm.recv(source=rank_j, tag=1)
-                output.append(data_out)
+            batch_ranks = sub_ranks[:idx_e - idx_s]
+            if not launch_control:
+                for rank_j in batch_ranks:
+                    output.append(comm.recv(source=rank_j, tag=1))
+                continue
+
+            remaining = set(batch_ranks)
+            expected_cases = {
+                rank_j: case_data['case_name']
+                for rank_j, case_data in zip(batch_ranks, case_data_all[idx_s:idx_e])
+            }
+            waiting = {}
+            batch_results = {}
+
+            while remaining:
+                progressed = False
+
+                status = MPI.Status()
+                while comm.Iprobe(source=MPI.ANY_SOURCE, tag=_MPI_LAUNCH_REQUEST_TAG, status=status):
+                    source = status.Get_source()
+                    request = comm.recv(source=source, tag=_MPI_LAUNCH_REQUEST_TAG)
+                    if (
+                        source in remaining
+                        and source not in active_ranks
+                        and request['case_name'] == expected_cases[source]
+                    ):
+                        waiting[source] = request
+                    progressed = True
+
+                status = MPI.Status()
+                while comm.Iprobe(source=MPI.ANY_SOURCE, tag=_MPI_LAUNCH_COMPLETE_TAG, status=status):
+                    source = status.Get_source()
+                    completed = comm.recv(source=source, tag=_MPI_LAUNCH_COMPLETE_TAG)
+                    if source in active_ranks and completed['case_name'] == expected_cases[source]:
+                        node = active_ranks.pop(source)
+                        node_state[node]['active'] -= 1
+                    progressed = True
+
+                status = MPI.Status()
+                while comm.Iprobe(source=MPI.ANY_SOURCE, tag=1, status=status):
+                    source = status.Get_source()
+                    result = comm.recv(source=source, tag=1)
+                    if source in remaining:
+                        batch_results[source] = result
+                        remaining.remove(source)
+                        waiting.pop(source, None)
+                        node = active_ranks.pop(source, None)
+                        if node is not None:
+                            node_state[node]['active'] -= 1
+                    progressed = True
+
+                now = time.monotonic()
+                for source, request in list(waiting.items()):
+                    node = request['node']
+                    state = node_state.setdefault(node, {'started': 0, 'active': 0, 'last_start': 0.0})
+                    burst = state['started'] < self.NBURST
+                    available_gb = request['available_gb']
+                    if available_gb is None and self.MINAVAIL_GB > 0.0 and node not in warned_memory_nodes:
+                        print(f"OpenFAST launch control: MemAvailable unavailable on node {node}; memory check disabled.")
+                        warned_memory_nodes.add(node)
+
+                    maxw_ok = self.MAXW <= 0 or state['active'] < self.MAXW
+                    memory_ok = self.MINAVAIL_GB <= 0.0 or available_gb is None or available_gb >= self.MINAVAIL_GB
+                    stagger_ok = self.STAGGER <= 0.0 or now - state['last_start'] >= self.STAGGER
+                    if not burst and not (maxw_ok and memory_ok and stagger_ok):
+                        continue
+
+                    mode = 'burst' if burst else 'controlled'
+                    comm.send(
+                        {'case_name': request['case_name'], 'mode': mode},
+                        dest=source,
+                        tag=_MPI_LAUNCH_PERMISSION_TAG,
+                    )
+                    state['started'] += 1
+                    state['active'] += 1
+                    state['last_start'] = now
+                    active_ranks[source] = node
+                    del waiting[source]
+                    progressed = True
+
+                if not progressed:
+                    time.sleep(0.05)
+
+            output.extend(batch_results[rank_j] for rank_j in batch_ranks)
 
         ss = {}
         et = {}
@@ -630,7 +782,8 @@ def evaluate(indict):
                   'FAST_InputFile', 'FAST_directory', 'read_yaml', 'FAST_yamlfile_in', 'fst_vt',
                   'write_yaml', 'FAST_yamlfile_out', 'channels', 'overwrite_outfiles', 'keep_time',
                   'goodman','magnitude_channels','fatigue_channels','post','use_exe','allow_fails','fail_value', 'write_stdout',
-                  'multiple_loading_files', 'startup_wave_size', 'startup_wave_interval_seconds']
+                  'multiple_loading_files', 'NBURST', 'STAGGER', 'MAXW', 'MINAVAIL_GB',
+                  '_mpi_launch_parent_rank']
     
     fast = runFAST_pywrapper()
     for k in indict:
