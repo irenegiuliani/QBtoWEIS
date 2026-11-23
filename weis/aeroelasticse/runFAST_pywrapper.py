@@ -10,6 +10,7 @@ import copy
 import json
 import platform
 import multiprocessing as mp
+import time
 
 from openfast_io.FAST_reader import InputReader_OpenFAST
 from openfast_io.FAST_writer import InputWriter_OpenFAST
@@ -146,6 +147,8 @@ class runFAST_pywrapper(object):
         self.fail_value         = 9999
         self.write_stdout       = False
         self.multiple_loading_files = ''
+        self.startup_wave_size = 0
+        self.startup_wave_interval_seconds = 0.0
         
         self.overwrite_outfiles = True   # True: existing output files will be overwritten, False: if output file with the same name already exists, OpenFAST WILL NOT RUN; This is primarily included for code debugging with OpenFAST in the loop or for specific Optimization Workflows where OpenFAST is to be run periodically instead of for every objective function anaylsis
 
@@ -166,6 +169,20 @@ class runFAST_pywrapper(object):
                 fatigue_channels=self.fatigue_channels,
                 #extreme_channels=channel_extremes_default,
             )
+
+    def _startup_wave_sleep(self):
+        if self.startup_wave_size <= 0 or self.startup_wave_interval_seconds <= 0.0:
+            return
+
+        local_rank = int(os.environ.get("SLURM_LOCALID", "0"))
+        wave_index = local_rank // self.startup_wave_size
+        delay = wave_index * self.startup_wave_interval_seconds
+        if delay > 0.0:
+            print(
+                f"OpenFAST startup wave: case={self.FAST_namingOut}, "
+                f"SLURM_LOCALID={local_rank}, wave_index={wave_index}, delay={delay}s"
+            )
+            time.sleep(delay)
         
     def execute(self):
 
@@ -302,6 +319,7 @@ class runFAST_pywrapper(object):
             os.chdir(FAST_directory)
         
             openfastlib = FastLibAPI(self.FAST_lib, os.path.abspath(os.path.basename(writer.FAST_InputFileOut)))
+            self._startup_wave_sleep()
             openfastlib.fast_run()
 
             output_dict = {}
@@ -339,6 +357,7 @@ class runFAST_pywrapper(object):
 
             #check if OpenFAST is set not to overwrite existing output files, TODO: move this further up in the workflow for minor computation savings
             if self.overwrite_outfiles or (not self.overwrite_outfiles and not (os.path.exists(FAST_Output) or os.path.exists(FAST_Output_txt))):
+                self._startup_wave_sleep()
                 failed = wrapper.execute()
                 if failed:
                     print('OpenFAST Failed! Please check the run logs.')
@@ -437,6 +456,8 @@ class runFAST_pywrapper_batch(object):
         self.fail_value         = 9999
         self.write_stdout       = False
         self.multiple_loading_files = ''
+        self.startup_wave_size = 0
+        self.startup_wave_interval_seconds = 0.0
         
         self.post               = None
 
@@ -472,6 +493,8 @@ class runFAST_pywrapper_batch(object):
             case_data['allow_fails']        = self.allow_fails
             case_data['fail_value']         = self.fail_value
             case_data['write_stdout']       = self.write_stdout
+            case_data['startup_wave_size'] = self.startup_wave_size
+            case_data['startup_wave_interval_seconds'] = self.startup_wave_interval_seconds
             case_data['multiple_loading_files'] = self.multiple_loading_files
             case_data['keep_time']          = self.keep_time
             case_data['goodman']            = self.goodman
@@ -607,7 +630,7 @@ def evaluate(indict):
                   'FAST_InputFile', 'FAST_directory', 'read_yaml', 'FAST_yamlfile_in', 'fst_vt',
                   'write_yaml', 'FAST_yamlfile_out', 'channels', 'overwrite_outfiles', 'keep_time',
                   'goodman','magnitude_channels','fatigue_channels','post','use_exe','allow_fails','fail_value', 'write_stdout',
-                  'multiple_loading_files']
+                  'multiple_loading_files', 'startup_wave_size', 'startup_wave_interval_seconds']
     
     fast = runFAST_pywrapper()
     for k in indict:

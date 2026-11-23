@@ -88,6 +88,14 @@ properties:
                         type: integer
                         default: 1
                         description: Number of parallel OpenFAST runs performed by OpenMDAO. WEIS sets this number once the preMPI keyword argument is set
+                    startup_wave_size:
+                        type: integer
+                        default: 0
+                        description: Number of OpenFAST workers launched simultaneously per node before delaying the next startup wave; zero disables staggered startup
+                    startup_wave_interval_seconds:
+                        type: number
+                        default: 0.0
+                        description: Delay in seconds between consecutive per-node OpenFAST startup waves; zero disables staggered startup
             qblade_configuration:
                 type: object
                 default: {}
