@@ -2783,7 +2783,7 @@ properties:
                         unit: m
                         description: 'Half-width of the domain in the Y direction (m) [>0, NOTE: Y[nY] = nY*dY, where nY = {-NY+1,-NY+2,…,NY-1} and dY = Y_HalfWidth/(NY-1)]'
                     Z_Depth:
-                        type: string
+                        type: [string, number]
                         default: default
                         unit: m
                         description: Depth of the domain the Z direction (m) relative to SWL [0 < Z_Depth <= WtrDpth+MSL2SWL;
