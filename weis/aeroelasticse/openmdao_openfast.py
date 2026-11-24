@@ -2399,7 +2399,11 @@ class FASTLoadCases(ExplicitComponent):
             time_series = time_series_map[case_id]
             if "Time" not in time_series:
                 raise KeyError(f"OpenFAST fatigue case {case_id} is missing the Time channel.")
-            time = np.asarray(time_series["Time"], dtype=float)
+            time_all = np.asarray(time_series["Time"], dtype=float)
+            transient_time = float(getattr(dlc_generator.cases[case_id], "transient_time", 0.0))
+            total_time = float(getattr(dlc_generator.cases[case_id], "total_time", np.inf))
+            post_transient = (time_all >= transient_time) & (time_all <= total_time)
+            time = time_all[post_transient]
             tensions = np.empty((self.n_mooring_lines, len(self.mooring_fatigue_stations), time.size))
             for i_line in range(self.n_mooring_lines):
                 for i_station, station in enumerate(self.mooring_fatigue_stations):
@@ -2407,7 +2411,9 @@ class FASTLoadCases(ExplicitComponent):
                     if channel not in time_series:
                         raise KeyError(f'Missing required OpenFAST MoorDyn fatigue channel "{channel}".')
                     # MoorDyn tension outputs are in N; the shared T-N calculation uses kN.
-                    tensions[i_line, i_station] = np.asarray(time_series[channel], dtype=float) * 1.0e-3
+                    tensions[i_line, i_station] = (
+                        np.asarray(time_series[channel], dtype=float)[post_transient] * 1.0e-3
+                    )
             histories.append(tensions)
             probabilities.append(float(dlc_generator.cases[case_id].probability))
             times.append(time)
@@ -3131,7 +3137,9 @@ class FASTLoadCases(ExplicitComponent):
 
         # Save each timeseries as a pickled dataframe
         for i_ts, timeseries in enumerate(chan_time):
-            timeseries_to_save = timeseries
+            time = np.asarray(timeseries['Time'])
+            post_transient = (time >= self.TStart[i_ts]) & (time <= self.TMax[i_ts])
+            requested_channels = None
             if filter_channels is not None:
                 missing_channels = [channel for channel in filter_channels if channel not in timeseries]
                 if missing_channels:
@@ -3142,15 +3150,17 @@ class FASTLoadCases(ExplicitComponent):
                     )
 
                 requested_channels = set(filter_channels)
-                timeseries_to_save = {
-                    channel: values for channel, values in timeseries.items()
-                    if channel in requested_channels
-                }
-                if not any(channel != 'Time' for channel in timeseries_to_save):
-                    logger.warning(
-                        "OpenFAST output filter left no data channels to save for timeseries %d.",
-                        i_ts,
-                    )
+
+            timeseries_to_save = {
+                channel: np.asarray(values)[post_transient]
+                for channel, values in timeseries.items()
+                if requested_channels is None or channel in requested_channels
+            }
+            if filter_channels is not None and not any(channel != 'Time' for channel in timeseries_to_save):
+                logger.warning(
+                    "OpenFAST output filter left no data channels to save for timeseries %d.",
+                    i_ts,
+                )
 
             output = OpenFASTOutput.from_dict(timeseries_to_save, self.FAST_namingOut)
             output.df.to_pickle(os.path.join(save_dir,self.FAST_namingOut + '_' + str(i_ts) + '.p'))
