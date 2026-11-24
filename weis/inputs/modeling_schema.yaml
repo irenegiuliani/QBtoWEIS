@@ -44,6 +44,10 @@ properties:
                         type: boolean
                         default: True
                         description: Save openfast output timeseries
+                    openfast_output_filter:
+                        type: string
+                        default: none
+                        description: Name of a text file containing one OpenFAST channel name per line to save in the timeseries pickle files. Time is always included. Use none to save all channels. Relative paths are resolved from the modeling options directory.
                     keep_time:
                         type: boolean
                         default: True

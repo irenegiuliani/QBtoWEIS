@@ -3096,9 +3096,34 @@ class FASTLoadCases(ExplicitComponent):
 
     def save_timeseries(self,chan_time):
         '''
-        Save ALL the timeseries: each iteration and openfast run thereof
+        Save the timeseries for each iteration and OpenFAST run, optionally
+        filtering only the copy written to disk.
         TODO: move this deeper into runFAST so we can clear chan_time
         '''
+
+        filter_name = self.options['modeling_options']['General']['openfast_configuration'].get(
+            'openfast_output_filter', 'none'
+        )
+        filter_channels = None
+        if filter_name and str(filter_name).strip().lower() != 'none':
+            filter_path = str(filter_name).strip()
+            if not os.path.isabs(filter_path):
+                filter_path = os.path.join(self.modopt_dir, filter_path)
+
+            try:
+                with open(filter_path, 'r', encoding='utf-8') as filter_file:
+                    filter_channels = list(dict.fromkeys(
+                        line.strip() for line in filter_file if line.strip()
+                    ))
+                if 'Time' not in filter_channels:
+                    filter_channels.insert(0, 'Time')
+            except OSError as error:
+                logger.warning(
+                    "OpenFAST output filter '%s' could not be read (%s). Saving all timeseries channels.",
+                    filter_path,
+                    error,
+                )
+                filter_channels = None
 
         # Make iteration directory
         save_dir = os.path.join(self.FAST_runDirectory,'iteration_'+str(self.of_inumber),'timeseries')
@@ -3106,7 +3131,28 @@ class FASTLoadCases(ExplicitComponent):
 
         # Save each timeseries as a pickled dataframe
         for i_ts, timeseries in enumerate(chan_time):
-            output = OpenFASTOutput.from_dict(timeseries, self.FAST_namingOut)
+            timeseries_to_save = timeseries
+            if filter_channels is not None:
+                missing_channels = [channel for channel in filter_channels if channel not in timeseries]
+                if missing_channels:
+                    logger.warning(
+                        "OpenFAST output filter requested channels not present in timeseries %d: %s",
+                        i_ts,
+                        ', '.join(missing_channels),
+                    )
+
+                requested_channels = set(filter_channels)
+                timeseries_to_save = {
+                    channel: values for channel, values in timeseries.items()
+                    if channel in requested_channels
+                }
+                if not any(channel != 'Time' for channel in timeseries_to_save):
+                    logger.warning(
+                        "OpenFAST output filter left no data channels to save for timeseries %d.",
+                        i_ts,
+                    )
+
+            output = OpenFASTOutput.from_dict(timeseries_to_save, self.FAST_namingOut)
             output.df.to_pickle(os.path.join(save_dir,self.FAST_namingOut + '_' + str(i_ts) + '.p'))
 
     def save_iterations(self,summ_stats,DELs,discrete_outputs):
