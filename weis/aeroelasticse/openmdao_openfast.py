@@ -550,6 +550,12 @@ class FASTLoadCases(ExplicitComponent):
         if modopt["flags"]["mooring"]:
             self.add_output("Max_MoorLineTension", val=np.zeros(self.n_mooring_lines), units="N")
             self.add_output("moor_axial_load_ratio", val=np.zeros(self.n_mooring_lines))
+            self.add_output(
+                "constr_mooring_length_at_max_surge",
+                val=np.zeros(self.n_mooring_lines),
+                desc=("Ratio of unstretched mooring-line length to the maximum simulated "
+                      "3D anchor-to-fairlead distance."),
+            )
             if self.mooring_fatigue_active:
                 fatigue_shape = (self.n_mooring_lines, len(self.mooring_fatigue_stations))
                 self.add_output("mooring_fatigue_load_sum", val=np.zeros(fatigue_shape))
@@ -2989,7 +2995,87 @@ class FASTLoadCases(ExplicitComponent):
         # Max platform offset        
         outputs['Max_Offset'] = sum_stats['PtfmOffset']['max'].max()
 
+        if self.options['opt_options']['constraints']['floating'].get('constr_mooring_length_at_max_surge', {}).get('flag', False):
+            outputs['constr_mooring_length_at_max_surge'] = self._mooring_length_max_distance(
+                chan_time, inputs, discrete_inputs
+            )
+
         return outputs, discrete_outputs
+
+    def _mooring_length_max_distance(self, chan_time, inputs, discrete_inputs):
+        """Return each line's unstretched length divided by its largest simulated endpoint distance.
+
+        MoorDyn vessel points are expressed relative to the platform reference
+        point.  Their global positions are reconstructed at every OpenFAST time
+        step using the platform translations and Z-Y-X yaw-pitch-roll rotation.
+        """
+        mooropt = self.options['modeling_options']['mooring']
+        node_names = list(discrete_inputs['node_names'])
+        n_nodes = mooropt['n_nodes']
+        if len(node_names) != n_nodes or len(set(node_names)) != n_nodes:
+            raise ValueError('Mooring node names must be complete and unique.')
+
+        node_positions = np.asarray(inputs['nodes_location_full'], dtype=float)
+        if node_positions.shape != (n_nodes, 3) or not np.all(np.isfinite(node_positions)):
+            raise ValueError('Mooring node positions must be finite coordinates with shape (n_nodes, 3).')
+
+        node_index = {name: i for i, name in enumerate(node_names)}
+        line_endpoint_indices = []
+        for i_line, (node1, node2) in enumerate(zip(mooropt['node1'], mooropt['node2'])):
+            if node1 not in node_index or node2 not in node_index:
+                raise ValueError(f'Mooring line {i_line + 1} references an unknown node.')
+            id1, id2 = node_index[node1], node_index[node2]
+            type1 = str(mooropt['node_type'][id1]).lower()
+            type2 = str(mooropt['node_type'][id2]).lower()
+            fixed1, fixed2 = type1.startswith('fix'), type2.startswith('fix')
+            vessel1, vessel2 = type1 == 'vessel', type2 == 'vessel'
+            if fixed1 and vessel2:
+                line_endpoint_indices.append((id1, id2))
+            elif vessel1 and fixed2:
+                line_endpoint_indices.append((id2, id1))
+            else:
+                raise ValueError(
+                    f'Mooring line {i_line + 1} must connect exactly one fixed node and one vessel node; '
+                    f'got {type1!r} and {type2!r}.'
+                )
+
+        max_distance = np.zeros(self.n_mooring_lines)
+        channel_names = ('PtfmSurge', 'PtfmSway', 'PtfmHeave', 'PtfmRoll', 'PtfmPitch', 'PtfmYaw')
+        for i_case, timeseries in enumerate(chan_time):
+            missing = [name for name in channel_names if name not in timeseries]
+            if missing:
+                raise ValueError(
+                    f'OpenFAST time series {i_case} is missing platform-motion channels: {", ".join(missing)}.'
+                )
+            motion = [np.asarray(timeseries[name], dtype=float) for name in channel_names]
+            n_time = motion[0].size
+            if n_time == 0 or any(values.ndim != 1 or values.size != n_time for values in motion):
+                raise ValueError(f'OpenFAST time series {i_case} has inconsistent platform-motion channels.')
+            if any(not np.all(np.isfinite(values)) for values in motion):
+                raise ValueError(f'OpenFAST time series {i_case} has non-finite platform motion.')
+
+            surge, sway, heave, roll, pitch, yaw = motion
+            roll, pitch, yaw = np.deg2rad(roll), np.deg2rad(pitch), np.deg2rad(yaw)
+            cr, sr = np.cos(roll), np.sin(roll)
+            cp, sp = np.cos(pitch), np.sin(pitch)
+            cy, sy = np.cos(yaw), np.sin(yaw)
+            rotation = np.empty((n_time, 3, 3))
+            rotation[:, 0, :] = np.column_stack((cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr))
+            rotation[:, 1, :] = np.column_stack((sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr))
+            rotation[:, 2, :] = np.column_stack((-sp, cp * sr, cp * cr))
+            translation = np.column_stack((surge, sway, heave))
+
+            for i_line, (anchor_id, fairlead_id) in enumerate(line_endpoint_indices):
+                fairlead = np.einsum('tij,j->ti', rotation, node_positions[fairlead_id]) + translation
+                distance = np.linalg.norm(fairlead - node_positions[anchor_id], axis=1)
+                max_distance[i_line] = max(max_distance[i_line], np.max(distance))
+
+        if np.any(max_distance <= 0.0) or not np.all(np.isfinite(max_distance)):
+            raise ValueError('Mooring-line endpoint distance must be positive and finite during OpenFAST simulation.')
+        length = np.asarray(inputs['unstretched_length'], dtype=float)
+        if length.size != self.n_mooring_lines or not np.all(np.isfinite(length)):
+            raise ValueError('Unstretched mooring-line lengths must be finite and match the number of lines.')
+        return length / max_distance
 
     def get_OL2CL_error(self,chan_time,outputs):
         ol_case_names = [os.path.join(

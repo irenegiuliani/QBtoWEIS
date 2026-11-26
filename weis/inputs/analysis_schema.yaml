@@ -529,10 +529,10 @@ properties:
                         description: Require each unstretched mooring line length to be at least the 3D distance between its endpoint nodes.
                         properties:
                             flag: *flag
-                    mooring_length_min_equilibrium:
+                    constr_mooring_length_at_max_surge:
                         type: object
                         default: {}
-                        description: Require each unstretched mooring line length to be at least its 3D anchor-to-fairlead distance at the maximum positive surge simulated by QBlade.
+                        description: Require each unstretched mooring line length to be at least its maximum simulated 3D anchor-to-fairlead distance. QBlade evaluates the maximum positive surge; OpenFAST evaluates all platform 6-DOF time steps.
                         properties:
                             flag: *flag
                     Max_Offset:

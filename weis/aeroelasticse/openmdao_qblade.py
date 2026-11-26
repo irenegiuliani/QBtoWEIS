@@ -516,7 +516,7 @@ class QBLADELoadCases(ExplicitComponent):
             self.add_output("Max_MoorLineTension", val=np.zeros(self.n_mooring_lines), units="N", desc="Maximum tension in each mooring line")
             self.add_output("moor_axial_load_ratio", val=np.zeros(self.n_mooring_lines), desc="ULS axial load utilization of each mooring line")
             self.add_output(
-                "constr_mooring_length_min_equilibrium",
+                "constr_mooring_length_at_max_surge",
                 val=np.zeros(self.n_mooring_lines),
                 desc=("Ratio of unstretched mooring-line length to its straight-line "
                       "anchor-to-fairlead distance at the maximum simulated positive surge."),
@@ -3668,7 +3668,7 @@ class QBLADELoadCases(ExplicitComponent):
             L_min = np.linalg.norm(node_positions[endpoint_2] - node_positions[endpoint_1], axis=1)
             if np.any(L_min <= 0.0):
                 raise ValueError('Mooring-line endpoint distance must be positive at maximum surge.')
-            outputs['constr_mooring_length_min_equilibrium'] = (
+            outputs['constr_mooring_length_at_max_surge'] = (
                 np.asarray(inputs['unstretched_length'], dtype=float) / L_min
             )
             
