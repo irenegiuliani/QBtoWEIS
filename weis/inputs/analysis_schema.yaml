@@ -535,6 +535,14 @@ properties:
                         description: Require each unstretched mooring line length to be at least its maximum simulated 3D anchor-to-fairlead distance. QBlade evaluates the maximum positive surge; OpenFAST evaluates all platform 6-DOF time steps.
                         properties:
                             flag: *flag
+                            lower_bound:
+                                type: array
+                                default: [1.0]
+                                minItems: 1
+                                description: Lower bound on unstretched-length to maximum endpoint-distance ratio; one value applies to every line, or provide one value per mooring line.
+                                items:
+                                    type: number
+                                    minimum: 0.0
                     Max_Offset:
                         type: object
                         default: {}

@@ -259,15 +259,28 @@ class PoseOptimizationWEIS(PoseOptimization):
                 raise Exception('The mooring-length equilibrium constraint requires the mooring model.')
             if not self.modeling['flags']['floating']:
                 raise Exception('The mooring-length equilibrium constraint requires a floating system.')
+            lower_bound = np.asarray(
+                self.opt['constraints']['floating']['constr_mooring_length_at_max_surge'].get(
+                    'lower_bound', [1.0]
+                ),
+                dtype=float,
+            )
+            n_lines = self.modeling['mooring']['n_lines']
+            if lower_bound.ndim != 1 or lower_bound.size not in (1, n_lines) or not np.all(np.isfinite(lower_bound)):
+                raise ValueError(
+                    'constr_mooring_length_at_max_surge.lower_bound must contain one finite value '
+                    'or one finite value per mooring line.'
+                )
+            lower_bound = float(lower_bound[0]) if lower_bound.size == 1 else lower_bound
             if self.modeling['OpenFAST']['flag']:
                 wt_opt.model.add_constraint(
-                    'aeroelastic.constr_mooring_length_at_max_surge', lower=1.0
+                    'aeroelastic.constr_mooring_length_at_max_surge', lower=lower_bound
                 )
             elif self.modeling['QBlade']['flag']:
                 if self.modeling['QBlade']['from_qblade']:
                     raise Exception('The QBlade mooring-length equilibrium constraint requires from_qblade=False.')
                 wt_opt.model.add_constraint(
-                    'aeroelastic_qblade.constr_mooring_length_at_max_surge', lower=1.0
+                    'aeroelastic_qblade.constr_mooring_length_at_max_surge', lower=lower_bound
                 )
             else:
                 raise Exception('The mooring-length equilibrium constraint requires OpenFAST or QBlade.')
